@@ -1,15 +1,14 @@
-# Minimal Manila ShareDriver stub for standalone unit testing.
-# The real class is in the installed manila package.
+# Stub — provides minimal manila.share.driver for standalone testing.
+# In production, the real Manila package supplies this module.
 
 
 class ShareDriver(object):
-    """Minimal stub of Manila's ShareDriver base class for unit testing."""
+    """Minimal stub of Manila's ShareDriver base class."""
 
     def __init__(self, driver_handles_share_servers, *args,
                  config_opts=None, **kwargs):
         self.driver_handles_share_servers = driver_handles_share_servers
         self._stats = {}
-        # Absorb configuration kwarg passed by driver code.
         if 'configuration' in kwargs:
             self.configuration = kwargs.pop('configuration')
 

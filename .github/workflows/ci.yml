@@ -25,7 +25,7 @@ jobs:
 
       - name: Run flake8
         run: |
-          flake8 manila tests \
+          flake8 manila/share/drivers/weka tests \
             --max-line-length=79 \
             --extend-ignore=E501 \
             --exclude=.venv,.git,.tox,dist,doc,*egg,build

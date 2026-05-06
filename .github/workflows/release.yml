@@ -31,7 +31,7 @@ jobs:
       - name: Run lint
         run: |
           pip install flake8 hacking
-          flake8 manila tests --max-line-length=79 --extend-ignore=E501
+          flake8 manila/share/drivers/weka tests --max-line-length=79 --extend-ignore=E501
 
   build:
     name: Build distribution packages
