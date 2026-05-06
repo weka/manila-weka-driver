@@ -21,7 +21,7 @@ import requests
 
 from manila.share.drivers.weka import client as weka_client
 from manila.share.drivers.weka import exceptions as weka_exc
-from tests.unit.share.drivers.weka import fakes
+from tests.unit import fakes
 
 
 def _make_response(status_code=200, json_data=None):

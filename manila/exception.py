@@ -1,5 +1,6 @@
-# Minimal Manila exception stubs for standalone unit testing.
-# In production, the real manila.exception module is used.
+# Stub — provides minimal manila.exception for standalone testing.
+# In production, the real Manila package supplies this module.
+
 
 class ManilaException(Exception):
     """Base Manila exception."""
@@ -37,7 +38,7 @@ class ShareNotFound(ManilaException):
 
 
 class ShareShrinkingPossibleDataLoss(ManilaException):
-    message = ("Share %(share_id)s shrinking error due to possible data loss.")
+    message = "Share %(share_id)s shrinking error due to possible data loss."
 
     def __init__(self, share_id=None, **kwargs):
         kwargs['share_id'] = share_id or 'unknown'
@@ -57,12 +58,9 @@ class ManageInvalidShare(ManilaException):
 
 
 class ManageExistingShareTypeMismatch(ManilaException):
-    message = "Manage existing share failed due to type mismatch: %(reason)s"
+    message = ("Manage existing share failed due to type mismatch: "
+               "%(reason)s")
 
 
 class UnmanageInvalidShare(ManilaException):
     message = "Unmanage share failed: %(reason)s"
-
-
-class VastDriverException(ManilaException):
-    message = "VAST driver error: %(reason)s"

@@ -1,4 +1,5 @@
-# Minimal Manila constants stub for standalone unit testing.
+# Stub — provides minimal manila.common.constants for standalone testing.
+# In production, the real Manila package supplies this module.
 
 ACCESS_LEVEL_RW = 'rw'
 ACCESS_LEVEL_RO = 'ro'

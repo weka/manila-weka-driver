@@ -24,7 +24,7 @@ from manila import exception
 from manila.share.drivers.weka import driver as weka_driver
 from manila.share.drivers.weka import exceptions as weka_exc
 from manila.share.drivers.weka import posix as weka_posix
-from tests.unit.share.drivers.weka import fakes
+from tests.unit import fakes
 
 CONF = cfg.CONF
 
