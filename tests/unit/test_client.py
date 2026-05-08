@@ -557,9 +557,12 @@ class TestWekaApiClientQuotas(unittest.TestCase):
 
 
 class TestWekaApiClientSDKStubs(unittest.TestCase):
-    """Smoke tests for SDK stub methods (not called by driver but part of
-    the public client API).  Validates that every stub method makes the
-    expected HTTP call to the correct path."""
+    """Smoke tests for SDK stub methods.
+
+    Not called by driver but part of the public client API.  Validates
+    that every stub method makes the expected HTTP call to the correct
+    path.
+    """
 
     def setUp(self):
         self.client = weka_client.WekaApiClient(

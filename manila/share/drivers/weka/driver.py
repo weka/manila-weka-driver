@@ -413,14 +413,16 @@ class WekaShareDriver(driver.ShareDriver):
         finally:
             if dst_mounted:
                 try:
-                    processutils.execute('umount', dst_mnt,
-                                        run_as_root=True, root_helper='sudo')
+                    processutils.execute(
+                        'umount', dst_mnt,
+                        run_as_root=True, root_helper='sudo')
                 except Exception as e:
                     LOG.warning("Failed to umount %s: %s", dst_mnt, e)
             if src_mounted:
                 try:
-                    processutils.execute('umount', src_mnt,
-                                        run_as_root=True, root_helper='sudo')
+                    processutils.execute(
+                        'umount', src_mnt,
+                        run_as_root=True, root_helper='sudo')
                 except Exception as e:
                     LOG.warning("Failed to umount %s: %s", src_mnt, e)
             for mnt in (src_mnt, dst_mnt):
@@ -603,7 +605,6 @@ class WekaShareDriver(driver.ShareDriver):
     def _update_nfs_access(self, share, add_rules, delete_rules):
         """Add / delete NFS permissions on the Weka cluster."""
         rule_state_map = {}
-        fs_uid = self._get_fs_uid_for_share(share)
         fs_name = self._share_name(share['id'])
 
         for rule in add_rules or []:

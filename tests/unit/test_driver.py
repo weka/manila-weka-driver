@@ -328,8 +328,11 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
     def test_src_mount_fails_reraises_and_cleans_up(
             self, mock_exec, mock_makedirs, mock_rmdir,
             mock_socket, mock_sleep):
-        """Src mount failure: exception re-raised; no umounts (nothing was
-        mounted); NFS permissions and client group still deleted."""
+        """Src mount failure: exception re-raised.
+
+        No umounts (nothing was mounted); NFS permissions and client
+        group still deleted.
+        """
         drv = self._make_driver()
         self._setup_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('10.0.0.1', 0)
@@ -412,8 +415,10 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
     def test_umount_failure_does_not_mask_rsync_exception(
             self, mock_exec, mock_makedirs, mock_rmdir,
             mock_socket, mock_sleep):
-        """A umount error in the finally block must not hide the original
-        exception — the rsync error is what the caller should see."""
+        """A umount error in the finally block must not hide the original.
+
+        The rsync error is what the caller should see.
+        """
         drv = self._make_driver()
         self._setup_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('10.0.0.1', 0)
@@ -435,8 +440,11 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
     def test_permission_delete_failure_does_not_raise_on_success(
             self, mock_exec, mock_makedirs, mock_rmdir,
             mock_socket, mock_sleep):
-        """A permission cleanup failure must not propagate when the copy
-        itself succeeded — export locations are still returned."""
+        """A permission cleanup failure must not propagate.
+
+        When the copy itself succeeded, export locations are still
+        returned.
+        """
         drv = self._make_driver()
         self._setup_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('10.0.0.1', 0)

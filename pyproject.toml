@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manila-weka-driver"
+version = "1.0.2"
+description = "OpenStack Manila share driver for Weka storage (WekaFS POSIX client)"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [{name = "Weka.IO", email = "openstack@weka.io"}]
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: OpenStack",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Filesystems",
+]
+dependencies = [
+    "requests>=2.25.0",
+    "oslo.config>=8.0.0",
+    "oslo.log>=4.0.0",
+    "oslo.utils>=4.0.0",
+    "oslo.concurrency>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/weka/manila-weka-driver"
+
+[project.entry-points."manila.share.drivers"]
+weka = "manila.share.drivers.weka.driver:WekaShareDriver"
+
+[tool.setuptools.packages]
+find = {include = ["manila.share.drivers.weka"], namespaces = true}
+
+[tool.flake8]
+show-source = true
+max-line-length = 79
+extend-ignore = ["E501"]
+exclude = [".venv", ".git", ".tox", "dist", "doc", "*egg", "build"]
