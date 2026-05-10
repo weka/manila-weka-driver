@@ -33,9 +33,9 @@ function install_manila_weka_driver {
     # packages not listed there. Use the shared venv's pip directly instead.
     local venv="/opt/stack/data/venv"
     if [ -f "${venv}/bin/pip" ]; then
-        "${venv}/bin/pip" install -e "${MANILA_WEKA_DRIVER_DIR}"
+        "${venv}/bin/pip" install "${MANILA_WEKA_DRIVER_DIR}"
     else
-        pip3 install -e "${MANILA_WEKA_DRIVER_DIR}"
+        pip3 install "${MANILA_WEKA_DRIVER_DIR}"
     fi
 
     # Symlink the driver package into the Manila source tree.
