@@ -3,7 +3,7 @@
 ## Development Setup
 
 ```bash
-git clone https://github.com/mbookham7/manila-weka-driver
+git clone git@github.com:weka/manila-weka-driver.git
 cd manila-weka-driver
 python -m venv .venv
 source .venv/bin/activate

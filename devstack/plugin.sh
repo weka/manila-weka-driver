@@ -3,12 +3,12 @@
 # DevStack plugin for the Manila Weka share driver
 #
 # INSTALLATION: This file (and devstack/settings) must be present in the
-# mbookham7/manila-weka-driver GitHub repository under the devstack/ directory
+# weka/manila-weka-driver GitHub repository under the devstack/ directory
 # for the enable_plugin directive in local.conf to work.
 #
 # Usage in local.conf:
 #   enable_plugin manila-weka-driver \
-#     https://github.com/mbookham7/manila-weka-driver main
+#     git@github.com:weka/manila-weka-driver.git main
 #
 # This plugin:
 #   1. Installs the manila-weka-driver Python package into Manila's venv

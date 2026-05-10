@@ -93,7 +93,7 @@ pip install manila-weka-driver
 Or directly from source:
 
 ```bash
-git clone https://github.com/mbookham7/manila-weka-driver
+git clone git@github.com:weka/manila-weka-driver.git
 cd manila-weka-driver
 pip install -e .
 ```
@@ -249,7 +249,7 @@ A DevStack plugin is included in `devstack/` for automated test environment setu
 Add to your `local.conf`:
 
 ```ini
-enable_plugin manila-weka-driver https://github.com/mbookham7/manila-weka-driver main
+enable_plugin manila-weka-driver git@github.com:weka/manila-weka-driver.git main
 ```
 
 The plugin:
