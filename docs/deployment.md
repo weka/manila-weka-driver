@@ -868,5 +868,5 @@ If you encounter a problem not covered in this guide:
    ```bash
    sudo journalctl -u openstack-manila-share --since "1 hour ago" > manila-share.log
    ```
-3. Open a GitHub issue at `https://github.com/mbookham7/manila-weka-driver/issues`
+3. Open a GitHub issue at `https://github.com/weka/manila-weka-driver/issues`
    and attach the log (remove any passwords first).
