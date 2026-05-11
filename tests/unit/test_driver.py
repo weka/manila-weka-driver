@@ -715,8 +715,8 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
         self.assertIn(rule_id, result)
         self.assertEqual('error', result[rule_id]['state'])
 
-    def test_update_access_wekafs_ip_rule_sets_error(self):
-        """WEKAFS shares reject all access rules — ip type returns error."""
+    def test_update_access_wekafs_ip_rule_accepted_as_noop(self):
+        """WEKAFS shares accept all access rules as no-op."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         rule = fakes.fake_access_rule(access_type='ip',
@@ -726,13 +726,13 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
             access_rules=[], add_rules=[rule], delete_rules=[],
             update_rules=[],
         )
-        self.assertEqual('error', result[rule['access_id']]['state'])
+        self.assertEqual('active', result[rule['access_id']]['state'])
         # No cluster API calls should be made
         drv._client.create_client_group.assert_not_called()
         drv._client.create_nfs_permission.assert_not_called()
 
-    def test_update_access_wekafs_user_rule_sets_error(self):
-        """WEKAFS shares reject all access rules — user type returns error."""
+    def test_update_access_wekafs_user_rule_accepted_as_noop(self):
+        """WEKAFS shares accept all access rules as no-op."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         rule = fakes.fake_access_rule(access_type='user',
@@ -742,7 +742,7 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
             access_rules=[], add_rules=[rule], delete_rules=[],
             update_rules=[],
         )
-        self.assertEqual('error', result[rule['access_id']]['state'])
+        self.assertEqual('active', result[rule['access_id']]['state'])
 
 
 class TestWekaShareDriverStats(unittest.TestCase):
