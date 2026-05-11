@@ -86,17 +86,18 @@ access protocols:
 
 ## Installation
 
-```bash
-pip install manila-weka-driver
-```
-
-Or directly from source:
+Clone the driver repository and symlink it into Manila's source tree:
 
 ```bash
-git clone git@github.com:weka/manila-weka-driver.git
-cd manila-weka-driver
-pip install -e .
+git clone https://github.com/weka/manila-weka-driver.git /opt/manila-weka-driver
+
+ln -s /opt/manila-weka-driver/manila/share/drivers/weka \
+      /path/to/manila/manila/share/drivers/weka
 ```
+
+> **Note:** Do **not** `pip install` this package into a Manila environment.
+> The namespace package layout conflicts with Manila's own `manila.share`
+> module and will break the Manila API service.
 
 ## Configuration
 
@@ -253,8 +254,7 @@ enable_plugin manila-weka-driver git@github.com:weka/manila-weka-driver.git main
 ```
 
 The plugin:
-- Installs the driver package into Manila's venv
-- Symlinks the driver into the Manila source tree
+- Symlinks the driver into Manila's source tree
 - Loads the `wekafs` kernel module
 - Patches `manila/common/constants.py` to add `WEKAFS` to `SUPPORTED_SHARE_PROTOCOLS`
 

@@ -11,10 +11,11 @@
 #     git@github.com:weka/manila-weka-driver.git main
 #
 # This plugin:
-#   1. Installs the manila-weka-driver Python package into Manila's venv
+#   1. Installs driver dependencies and symlinks the driver into Manila's
+#      source tree (pip install of the package itself is avoided because the
+#      namespace package layout conflicts with Manila's own manila.share)
 #   2. Ensures the WekaFS kernel module is available
 #   3. Creates the /mnt/weka mount base directory
-#   4. Symlinks the driver into the Manila source tree (fallback for dev mode)
 # =============================================================================
 
 MANILA_WEKA_DRIVER_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -27,20 +28,14 @@ fi
 # ─── Installation phase ────────────────────────────────────────────────────────
 
 function install_manila_weka_driver {
-    echo_summary "Installing Manila Weka driver package"
+    echo_summary "Installing Manila Weka driver"
 
-    # pip_install_gr checks OpenStack global requirements and rejects third-party
-    # packages not listed there. Use the shared venv's pip directly instead.
-    local venv="/opt/stack/data/venv"
-    if [ -f "${venv}/bin/pip" ]; then
-        "${venv}/bin/pip" install "${MANILA_WEKA_DRIVER_DIR}"
-    else
-        pip3 install "${MANILA_WEKA_DRIVER_DIR}"
-    fi
-
-    # Symlink the driver package into the Manila source tree.
-    # This ensures the driver is importable as manila.share.drivers.weka
-    # regardless of whether the venv install worked.
+    # We do NOT pip-install the manila-weka-driver package itself because its
+    # namespace package layout (manila.share.drivers.weka) creates implicit
+    # namespace entries for manila/, manila/share/, and manila/share/drivers/
+    # that shadow Manila's own modules (e.g. manila.share.share_types).
+    # All driver dependencies (requests, oslo.*) are already provided by Manila,
+    # so we only need to symlink the driver into Manila's source tree.
     local MANILA_DRIVERS_DIR="${MANILA_DIR}/manila/share/drivers"
     local WEKA_DRIVER_SRC="${MANILA_WEKA_DRIVER_DIR}/manila/share/drivers/weka"
     local WEKA_DRIVER_DEST="${MANILA_DRIVERS_DIR}/weka"

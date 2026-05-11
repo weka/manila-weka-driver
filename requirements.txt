@@ -1,6 +1,0 @@
-requests>=2.25.0
-oslo.config>=8.0.0
-oslo.log>=4.0.0
-oslo.utils>=4.0.0
-oslo.concurrency>=4.0.0
-oslo.i18n>=5.0.0
