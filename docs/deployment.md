@@ -415,45 +415,46 @@ You should receive a response containing `"access_token"`.  If you see
 
 ---
 
-## Step 4 — Install the Driver Package
+## Step 4 — Install the Driver
 
 All commands in this step run on the **Manila host**.
 
-### 4a — Activate the Manila Python environment
+> **Important:** Do **not** `pip install` this package into a Manila
+> environment.  The namespace package layout conflicts with Manila's own
+> `manila.share` module and will break the Manila API service.  Use the
+> symlink method below instead.
 
-Manila typically runs in a virtual environment or a system Python.  Find
-the right Python first:
+### 4a — Clone the repository
+
+```bash
+git clone https://github.com/weka/manila-weka-driver.git /opt/manila-weka-driver
+```
+
+### 4b — Find your Manila source tree
 
 ```bash
 # Try these in order until one works:
-which manila-manage
-ls /opt/stack/manila/           # DevStack installations
-ls /usr/lib/python3/dist-packages/manila/   # package installations
+ls /opt/stack/manila/manila/share/drivers/         # DevStack installations
+ls /usr/lib/python3/dist-packages/manila/share/drivers/   # package installations
 ```
 
-For a typical production install (e.g. from RDO or Ubuntu Cloud Archive):
+### 4c — Symlink the driver into Manila
 
 ```bash
-sudo pip3 install manila-weka-driver
+# Replace MANILA_DIR with the path found above (e.g. /opt/stack/manila)
+ln -s /opt/manila-weka-driver/manila/share/drivers/weka \
+      MANILA_DIR/manila/share/drivers/weka
 ```
 
-For a DevStack or virtualenv install:
-
-```bash
-# Activate Manila's virtualenv first
-source /opt/stack/manila/.venv/bin/activate    # adjust path as needed
-pip install manila-weka-driver
-```
-
-### 4b — Verify the driver installed
+### 4d — Verify the driver is importable
 
 ```bash
 python3 -c "from manila.share.drivers.weka.driver import WekaShareDriver; print('OK')"
 ```
 
-You should see `OK`.  If you get `ModuleNotFoundError`, the driver is not
-on the Python path — make sure you installed into the same Python that
-Manila uses.
+You should see `OK`.  If you get `ModuleNotFoundError`, verify the
+symlink points to the correct location and that you are using the same
+Python that Manila uses.
 
 ---
 
@@ -851,10 +852,14 @@ openstack share list --share-type weka-default
 openstack share delete <share-id>
 ```
 
-### 4 — Remove the package
+### 4 — Remove the driver
 
 ```bash
-pip3 uninstall manila-weka-driver
+# Remove the symlink from Manila's source tree
+rm /path/to/manila/manila/share/drivers/weka
+
+# Optionally remove the cloned repository
+rm -rf /opt/manila-weka-driver
 ```
 
 ---
