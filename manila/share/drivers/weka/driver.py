@@ -665,21 +665,18 @@ class WekaShareDriver(driver.ShareDriver):
         and mount tokens.  The Manila access-rules API has no mapping onto
         those mechanisms in the current driver implementation.
 
-        All rules are therefore rejected with an 'error' state so that
-        operators receive an explicit failure rather than a silent no-op
-        that appears to succeed but has no effect.
-
-        See docs/known-issues.md for details and future work.
+        All rules are accepted as a no-op so that the Manila access rule
+        workflow completes normally.
         """
         rule_state_map = {}
         for rule in add_rules or []:
-            LOG.warning(
-                "WekaFS shares do not support Manila access rules "
+            LOG.info(
+                "WekaFS shares do not enforce Manila access rules "
                 "(type=%s, rule=%s). Access control for WEKAFS shares is "
                 "managed via Weka filesystem authentication and mount tokens.",
                 rule['access_type'], rule['access_id'],
             )
-            rule_state_map[rule['access_id']] = {'state': 'error'}
+            rule_state_map[rule['access_id']] = {'state': 'active'}
         return rule_state_map
 
     def _remove_nfs_rule(self, fs_name, rule):
