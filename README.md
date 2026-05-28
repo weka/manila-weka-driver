@@ -83,6 +83,7 @@ access protocols:
 | [Architecture Overview](#architecture) | How the driver fits into OpenStack Manila |
 | [Configuration Reference](#configuration) | All `weka_*` options explained |
 | [Known Issues and Limitations](docs/known-issues.md) | Known constraints, workarounds, and areas for future improvement |
+| [Third-Party CI](#third-party-ci) | CI setup for running tempest tests against a real Weka cluster |
 
 ## Installation
 
@@ -314,6 +315,82 @@ tox -e pep8
 # Coverage report
 tox -e cover
 ```
+
+## Third-Party CI
+
+A third-party CI system is included in `ci/` that runs Manila tempest
+tests against a real Weka cluster on every Gerrit patchset.
+
+### Quick Setup
+
+```bash
+# From your local machine:
+cd ci/
+./bootstrap.sh <vm_ip> <weka_api_server> <weka_password> <gerrit_user> [ssh_user]
+
+# Example:
+./bootstrap.sh 138.2.136.28 10.0.1.156 MyWekaPass Assaf ubuntu
+```
+
+### Requirements
+
+- **CI VM:** Ubuntu 22.04+, 4+ CPUs, 16 GB RAM, 100 GB disk
+- **Weka cluster:** Running Weka 5.x, API accessible on port 14000
+- **Gerrit account:** On review.opendev.org with an SSH key
+
+### What It Does
+
+1. Deploys DevStack with Manila and the Weka driver on the CI VM
+2. Listens for new patchsets on Gerrit via SSH streaming
+3. Runs Manila tempest tests against both NFS and WEKAFS backends
+4. Posts results back to the Gerrit review
+5. Rebuilds DevStack nightly to prevent state drift
+
+### CI Scripts
+
+| Script | Description |
+|--------|-------------|
+| `ci/bootstrap.sh` | One-command setup from your local machine |
+| `ci/setup.sh` | VM-side installer (called by bootstrap) |
+| `ci/gerrit-listener.py` | Listens for Gerrit patchset-created events |
+| `ci/ci-runner.sh` | Checks out a patchset and runs tempest tests |
+| `ci/post-results.sh` | Posts pass/fail results to Gerrit |
+| `ci/collect-logs.sh` | Collects and compresses logs for the log server |
+| `ci/full-redeploy.sh` | Tears down and rebuilds DevStack (nightly) |
+| `ci/ci-status.sh` | Generates a status report to share with reviewers |
+
+### Monitoring
+
+```bash
+# Live CI log
+ssh ubuntu@<vm_ip> 'journalctl -u weka-manila-ci -f'
+
+# Service status
+ssh ubuntu@<vm_ip> 'sudo systemctl status weka-manila-ci'
+
+# Generate status report
+./ci/ci-status.sh <vm_ip>
+
+# Browse test logs
+open http://<vm_ip>/ci-logs/
+```
+
+### Voting
+
+Voting is disabled by default. Once the Manila team grants voting rights:
+
+```bash
+ssh ubuntu@<vm_ip> \
+  'sudo sed -i "s/VOTING_ENABLED=false/VOTING_ENABLED=true/" \
+   /etc/systemd/system/weka-manila-ci.service && \
+   sudo systemctl daemon-reload && \
+   sudo systemctl restart weka-manila-ci'
+```
+
+### Log Retention
+
+CI logs are retained for 45 days (exceeds Manila's 30-day minimum
+requirement) and are browsable at `http://<vm_ip>/ci-logs/`.
 
 ## Contributing
 

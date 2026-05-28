@@ -1,0 +1,15 @@
+[Unit]
+Description=Weka Manila CI - Nightly Full DevStack Redeploy
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=stack
+Group=stack
+ExecStart=/opt/weka-ci/full-redeploy.sh
+TimeoutStartSec=7200
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=weka-manila-ci-redeploy
+Environment=HOME=/home/stack
+EnvironmentFile=/opt/weka-ci/ci-env

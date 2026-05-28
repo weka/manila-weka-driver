@@ -1,0 +1,117 @@
+[[local|localrc]]
+# ── Identity ──────────────────────────────────────────────
+ADMIN_PASSWORD=secretadmin
+DATABASE_PASSWORD=$ADMIN_PASSWORD
+RABBIT_PASSWORD=$ADMIN_PASSWORD
+SERVICE_PASSWORD=$ADMIN_PASSWORD
+SERVICE_TOKEN=supersecrettoken
+
+# ── Minimal services (no Nova/Cinder/Neutron) ────────────
+disable_all_services
+enable_service rabbit mysql key
+enable_service manila m-api m-sch m-shr
+enable_service tempest
+
+# ── Network ───────────────────────────────────────────────
+HOST_IP=${CI_VM_IP}
+SERVICE_HOST=${CI_VM_IP}
+FORCE=yes
+
+# ── Git repos ─────────────────────────────────────────────
+MANILA_REPO=https://opendev.org/openstack/manila.git
+MANILA_BRANCH=stable/2025.1
+RECLONE=False
+
+# Manila tempest plugin
+enable_plugin manila-tempest-plugin https://opendev.org/openstack/manila-tempest-plugin.git master
+
+# Weka driver plugin
+enable_plugin manila-weka-driver https://github.com/weka/manila-weka-driver.git main
+
+# ── Logging ───────────────────────────────────────────────
+LOGFILE=/opt/stack/logs/stack.sh.log
+LOG_COLOR=False
+LOGDAYS=1
+
+# ── Manila configuration ─────────────────────────────────
+MANILA_DEFAULT_SHARE_TYPE_EXTRA_SPECS="driver_handles_share_servers=false"
+MANILA_ENABLED_BACKENDS=weka_nfs,weka_wekafs
+MANILA_DEFAULT_SHARE_TYPE=weka-nfs
+SHARE_DRIVER=manila.share.drivers.weka.driver.WekaShareDriver
+MANILA_OPTGROUP_DEFAULT_driver_handles_share_servers=false
+
+# ── Tempest ───────────────────────────────────────────────
+INSTALL_TEMPEST=True
+
+[[post-config|$MANILA_CONF]]
+[DEFAULT]
+enabled_share_backends = weka_nfs,weka_wekafs
+enabled_share_protocols = NFS,WEKAFS
+default_share_type = weka-nfs
+debug = true
+
+# ── NFS backend ──────────────────────────────────────────
+[weka_nfs]
+share_driver = manila.share.drivers.weka.driver.WekaShareDriver
+share_backend_name = weka_nfs
+driver_handles_share_servers = false
+snapshot_support = true
+create_share_from_snapshot_support = true
+revert_to_snapshot_support = true
+weka_api_server = ${WEKA_API_SERVER}
+weka_api_port = ${WEKA_API_PORT}
+weka_ssl_verify = false
+weka_username = ${WEKA_USERNAME}
+weka_password = ${WEKA_PASSWORD}
+weka_organization = ${WEKA_ORGANIZATION}
+weka_filesystem_group = default
+weka_share_name_prefix = ci_nfs_
+weka_mount_point_base = /mnt/weka/nfs
+
+# ── WEKAFS backend ───────────────────────────────────────
+[weka_wekafs]
+share_driver = manila.share.drivers.weka.driver.WekaShareDriver
+share_backend_name = weka_wekafs
+driver_handles_share_servers = false
+snapshot_support = true
+create_share_from_snapshot_support = true
+revert_to_snapshot_support = true
+weka_api_server = ${WEKA_API_SERVER}
+weka_api_port = ${WEKA_API_PORT}
+weka_ssl_verify = false
+weka_username = ${WEKA_USERNAME}
+weka_password = ${WEKA_PASSWORD}
+weka_organization = ${WEKA_ORGANIZATION}
+weka_filesystem_group = default
+weka_share_name_prefix = ci_wfs_
+weka_mount_point_base = /mnt/weka/wekafs
+
+[[post-config|$TEMPEST_CONFIG]]
+[service_available]
+manila = true
+
+[share]
+multi_backend = true
+backend_names = weka_nfs,weka_wekafs
+multitenancy_enabled = false
+run_driver_assisted_migration_tests = false
+run_host_assisted_migration_tests = false
+run_manage_unmanage_tests = true
+run_manage_unmanage_snapshot_tests = false
+run_snapshot_tests = true
+run_revert_to_snapshot_tests = true
+run_shrink_tests = true
+run_extend_tests = true
+run_quota_tests = true
+run_share_group_tests = false
+run_replication_tests = false
+run_migration_tests = false
+run_ipv6_tests = false
+enable_protocols = nfs,wekafs
+enable_ip_rules_for_protocols = nfs
+enable_ro_access_level_for_protocols = nfs
+capability_snapshot_support = true
+capability_create_share_from_snapshot_support = true
+suppress_errors_in_cleanup = true
+share_creation_retry_number = 0
+build_timeout = 600

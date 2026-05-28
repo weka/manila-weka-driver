@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly DevStack redeploy for Weka Manila CI
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

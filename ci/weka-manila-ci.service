@@ -1,0 +1,20 @@
+[Unit]
+Description=Weka Manila Third-Party CI - Gerrit Event Listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stack
+Group=stack
+ExecStart=/usr/bin/python3 /opt/weka-ci/gerrit-listener.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=weka-manila-ci
+Environment=HOME=/home/stack
+Environment=GERRIT_USER=Assaf
+
+[Install]
+WantedBy=multi-user.target
