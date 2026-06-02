@@ -66,7 +66,9 @@ class WekaApiClient(object):
                  port=14000,
                  ssl_verify=True,
                  timeout=_DEFAULT_TIMEOUT,
-                 max_retries=_DEFAULT_RETRIES):
+                 max_retries=_DEFAULT_RETRIES,
+                 pool_connections=4,
+                 pool_maxsize=10):
         self._host = host
         self._port = port
         self._username = username
@@ -86,8 +88,8 @@ class WekaApiClient(object):
         self._session = requests.Session()
         adapter = req_adapters.HTTPAdapter(
             max_retries=0,  # handled manually
-            pool_connections=4,
-            pool_maxsize=10,
+            pool_connections=pool_connections,
+            pool_maxsize=pool_maxsize,
         )
         self._session.mount('https://', adapter)
         self._session.mount('http://', adapter)

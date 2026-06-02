@@ -206,3 +206,47 @@ A future implementation could map Manila IP rules to Weka NFS-style client
 groups on the WekaFS mount path, or map user rules to Weka user account
 permissions. This requires a deeper integration with Weka's authentication
 API and is tracked as a future enhancement.
+
+---
+
+## 7. Standard (Thick) Provisioning Only
+
+**Affects:** All shares.
+
+**Description:**
+Weka supports both standard and thin provisioning. With thin provisioning,
+administrators specify a minimum guaranteed SSD capacity
+(`thin-provision-min-ssd`) and a maximum capacity (`thin-provision-max-ssd`),
+allowing the cluster to over-commit SSD capacity across filesystems.
+
+The driver currently creates filesystems with standard provisioning only —
+capacity is fully reserved at creation time. The driver reports
+`thin_provisioning=False` in backend statistics so the Manila scheduler
+does not over-commit capacity.
+
+**Impact:**
+The total capacity of all Manila shares cannot exceed the cluster's
+available SSD capacity. There is no capacity over-subscription.
+
+**Future work:**
+A future release could add thin provisioning support by mapping Manila's
+provisioned capacity to Weka's `thin-provision-min-ssd` /
+`thin-provision-max-ssd` parameters, enabling over-subscription when the
+Manila `max_over_subscription_ratio` option is configured.
+
+---
+
+## 8. No Quality of Service (QoS) Support
+
+**Affects:** All shares.
+
+**Description:**
+Weka does not expose per-filesystem QoS controls such as IOPS limits or
+bandwidth throttling. Resource management is handled at the capacity level
+through filesystem quotas and directory quotas. The driver reports
+`qos=False` in backend statistics.
+
+**Impact:**
+Manila share types with QoS extra-specs (e.g. `max_iops`, `max_bandwidth`)
+cannot be enforced by this driver. All shares get equal access to the
+cluster's full performance.

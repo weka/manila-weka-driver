@@ -164,6 +164,10 @@ class WekaShareDriver(driver.ShareDriver):
             ssl_verify = True
         timeout = cfg_get('weka_api_timeout') or 30
         max_retries = cfg_get('weka_max_api_retries') or 3
+        pool_connections = (
+            cfg_get('weka_api_pool_connections') or 4
+        )
+        pool_maxsize = cfg_get('weka_api_pool_maxsize') or 10
 
         self._client = weka_client.WekaApiClient(
             host=host,
@@ -174,6 +178,8 @@ class WekaShareDriver(driver.ShareDriver):
             ssl_verify=ssl_verify,
             timeout=timeout,
             max_retries=max_retries,
+            pool_connections=pool_connections,
+            pool_maxsize=pool_maxsize,
         )
         self._client.login()
 

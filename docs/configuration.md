@@ -92,6 +92,14 @@ weka_api_timeout = 30
 # Maximum retries on transient errors (429, 5xx).
 # Uses exponential back-off (1s, 2s, 4s, ...).
 weka_max_api_retries = 3
+
+# Number of urllib3 connection pools for the API session.
+# Increase when connecting to multiple backend hosts.
+weka_api_pool_connections = 4
+
+# Max connections in the urllib3 pool. Should be >= expected
+# concurrent API requests.
+weka_api_pool_maxsize = 10
 ```
 
 ## Multi-Cluster Deployment

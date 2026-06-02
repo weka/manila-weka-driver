@@ -145,6 +145,28 @@ weka_opts = [
             '(HTTP 429 / 5xx). Uses exponential back-off. Default is 3.'
         ),
     ),
+    cfg.IntOpt(
+        'weka_api_pool_connections',
+        default=4,
+        min=1,
+        max=20,
+        help=(
+            'Number of urllib3 connection pools to keep for the Weka '
+            'API session. Increase when connecting to multiple backend '
+            'hosts. Default is 4.'
+        ),
+    ),
+    cfg.IntOpt(
+        'weka_api_pool_maxsize',
+        default=10,
+        min=1,
+        max=100,
+        help=(
+            'Maximum number of connections to save in the urllib3 '
+            'pool. Should be at least as large as the expected '
+            'number of concurrent API requests. Default is 10.'
+        ),
+    ),
 
     # --- Naming ---
     cfg.StrOpt(
