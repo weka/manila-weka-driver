@@ -9,17 +9,15 @@ SERVICE_TOKEN=supersecrettoken
 # ── Minimal services (no Nova/Cinder/Neutron) ────────────
 disable_all_services
 enable_service rabbit mysql key
-enable_service manila m-api m-sch m-shr
 enable_service tempest
 
 # ── Network ───────────────────────────────────────────────
-HOST_IP=${CI_VM_IP}
-SERVICE_HOST=${CI_VM_IP}
-FORCE=yes
+HOST_IP=${CI_HOST_IP}
+SERVICE_HOST=${CI_HOST_IP}
 
-# ── Git repos ─────────────────────────────────────────────
-MANILA_REPO=https://opendev.org/openstack/manila.git
-MANILA_BRANCH=stable/2025.1
+# ── Plugins ──────────────────────────────────────────────
+# Manila (DevStack plugin — installs manila, manilaclient, enables services)
+enable_plugin manila https://opendev.org/openstack/manila.git stable/2025.1
 RECLONE=False
 
 # Manila tempest plugin
@@ -34,7 +32,7 @@ LOG_COLOR=False
 LOGDAYS=1
 
 # ── Manila configuration ─────────────────────────────────
-MANILA_DEFAULT_SHARE_TYPE_EXTRA_SPECS="driver_handles_share_servers=false"
+MANILA_DEFAULT_SHARE_TYPE_EXTRA_SPECS=""
 MANILA_ENABLED_BACKENDS=weka_nfs,weka_wekafs
 MANILA_DEFAULT_SHARE_TYPE=weka-nfs
 SHARE_DRIVER=manila.share.drivers.weka.driver.WekaShareDriver

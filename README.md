@@ -334,7 +334,7 @@ cd ci/
 
 ### Requirements
 
-- **CI VM:** Ubuntu 22.04+, 4+ CPUs, 16 GB RAM, 100 GB disk
+- **CI VM:** Ubuntu 24.04, 4+ CPUs, 16 GB RAM, 100 GB disk
 - **Weka cluster:** Running Weka 5.x, API accessible on port 14000
 - **Gerrit account:** On review.opendev.org with an SSH key
 
@@ -372,7 +372,7 @@ ssh ubuntu@<vm_ip> 'sudo systemctl status weka-manila-ci'
 ./ci/ci-status.sh <vm_ip>
 
 # Browse test logs
-open http://<vm_ip>/ci-logs/
+open http://<vm_ip>:8088/
 ```
 
 ### Voting
@@ -390,7 +390,7 @@ ssh ubuntu@<vm_ip> \
 ### Log Retention
 
 CI logs are retained for 45 days (exceeds Manila's 30-day minimum
-requirement) and are browsable at `http://<vm_ip>/ci-logs/`.
+requirement) and are browsable at `http://<vm_ip>:8088/`.
 
 ## Contributing
 

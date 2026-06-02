@@ -2,7 +2,7 @@
 # =============================================================================
 # Weka Manila CI - Single-Command Bootstrap
 #
-# Run this from your local machine to set up a fresh Ubuntu 22.04 VM as a
+# Run this from your local machine to set up a fresh Ubuntu 24.04 VM as a
 # complete Manila third-party CI system. It copies all CI files to the VM,
 # runs setup, generates the SSH key, and verifies everything works.
 #
@@ -14,7 +14,7 @@
 #
 # Prerequisites:
 #   - You can SSH into the VM as <ssh_user> (default: ubuntu)
-#   - The VM is Ubuntu 22.04 with at least 4 CPUs, 16GB RAM, 100GB disk
+#   - The VM is Ubuntu 24.04 with at least 4 CPUs, 16GB RAM, 100GB disk
 #   - The Weka cluster is reachable from the VM
 #   - You have a Gerrit account on review.opendev.org
 # =============================================================================
@@ -53,10 +53,10 @@ if ! ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "${SSH_USER}@$
 fi
 log "SSH OK"
 
-# Verify Ubuntu 22.04
+# Verify Ubuntu 24.04
 DISTRO=$(ssh "${SSH_USER}@${VM_IP}" "lsb_release -cs 2>/dev/null || echo unknown")
-if [[ "$DISTRO" != "jammy" ]]; then
-    echo "WARNING: Expected Ubuntu 22.04 (jammy), got: ${DISTRO}"
+if [[ "$DISTRO" != "noble" ]]; then
+    echo "WARNING: Expected Ubuntu 24.04 (noble), got: ${DISTRO}"
     read -p "Continue anyway? [y/N] " -r
     [[ $REPLY =~ ^[Yy]$ ]] || exit 1
 fi
@@ -158,7 +158,7 @@ else
 fi
 
 # Check nginx
-NGINX_STATUS=$(ssh "${SSH_USER}@${VM_IP}" "curl -s -o /dev/null -w '%{http_code}' http://localhost/")
+NGINX_STATUS=$(ssh "${SSH_USER}@${VM_IP}" "curl -s -o /dev/null -w '%{http_code}' http://localhost:8088/")
 if [ "$NGINX_STATUS" = "200" ]; then
     log "Nginx log server is running"
 else
@@ -177,7 +177,7 @@ echo "  Weka Manila CI Setup Complete"
 echo "============================================================"
 echo ""
 echo "  CI VM:        ${VM_IP}"
-echo "  Logs:         http://${VM_IP}/ci-logs/"
+echo "  Logs:         http://${VM_IP}:8088/"
 echo "  Gerrit user:  ${GERRIT_USER}"
 echo "  Weka cluster: ${WEKA_API_SERVER}:14000"
 echo ""

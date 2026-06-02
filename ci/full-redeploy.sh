@@ -72,7 +72,8 @@ else
 fi
 
 # Install local.conf from template, substituting environment variables
-envsubst '$CI_VM_IP $WEKA_API_SERVER $WEKA_API_PORT $WEKA_USERNAME $WEKA_PASSWORD $WEKA_ORGANIZATION' < "${CI_DIR}/local.conf.template" > "${DEVSTACK_DIR}/local.conf"
+export CI_HOST_IP="$(hostname -I | awk '{print $1}')"
+envsubst '$CI_HOST_IP $CI_VM_IP $WEKA_API_SERVER $WEKA_API_PORT $WEKA_USERNAME $WEKA_PASSWORD $WEKA_ORGANIZATION' < "${CI_DIR}/local.conf.template" > "${DEVSTACK_DIR}/local.conf"
 
 cd "$DEVSTACK_DIR"
 ./stack.sh 2>&1
@@ -103,6 +104,7 @@ openstack share type create weka-wekafs false \
     snapshot_support=true \
     create_share_from_snapshot_support=true \
     revert_to_snapshot_support=true \
+    share_proto=WEKAFS \
     2>&1 || log "WARNING: Failed to create weka-wekafs share type (may already exist)"
 
 # Verify

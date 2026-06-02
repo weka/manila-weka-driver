@@ -46,6 +46,14 @@ log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*"; }
 log "=== CI run starting for change ${CHANGE_NUM},${PATCHSET_NUM} ==="
 log "Revision: ${REVISION}"
 
+# ── Helper: restore clean master ─────────────────────────────────────────────
+
+restore_clean_master() {
+    cd "$MANILA_DIR" || return 1
+    git reset --hard origin/master 2>&1 || return 1
+    sudo systemctl restart devstack@m-shr devstack@m-api devstack@m-sch 2>&1 || return 1
+}
+
 # ── Helper: post failure and exit ─────────────────────────────────────────────
 
 fail() {
@@ -68,6 +76,27 @@ cd "$MANILA_DIR" || fail "Manila directory not found at ${MANILA_DIR}"
 git fetch origin master 2>&1 || fail "Failed to fetch origin master"
 git reset --hard origin/master 2>&1 || fail "Failed to reset to origin/master"
 git clean -fdx 2>&1 || true
+
+# Sync dependencies after reset (master may have new requirements)
+log "Installing Manila dependencies..."
+sudo rm -rf manila.egg-info 2>/dev/null || true
+/opt/stack/data/venv/bin/pip install -e . -q 2>&1 \
+    || fail "Failed to install Manila dependencies"
+
+# Re-link the Weka driver into Manila's source tree (git reset removes it)
+WEKA_DRIVER_SRC="/opt/stack/manila-weka-driver/manila/share/drivers/weka"
+WEKA_DRIVER_DEST="${MANILA_DIR}/manila/share/drivers/weka"
+ln -sfn "$WEKA_DRIVER_SRC" "$WEKA_DRIVER_DEST" \
+    || fail "Failed to symlink Weka driver into Manila"
+
+# Re-patch WEKAFS into Manila's supported protocols (git reset reverts it)
+CONSTANTS_FILE="${MANILA_DIR}/manila/common/constants.py"
+if ! grep -q "'WEKAFS'" "$CONSTANTS_FILE" 2>/dev/null; then
+    sed -i "s/SUPPORTED_SHARE_PROTOCOLS = (/SUPPORTED_SHARE_PROTOCOLS = (/;s/'MAPRFS')/'MAPRFS', 'WEKAFS')/" \
+        "$CONSTANTS_FILE" \
+        || fail "Failed to patch WEKAFS into Manila constants"
+    log "Patched WEKAFS into SUPPORTED_SHARE_PROTOCOLS"
+fi
 
 # ── Phase 2: Cherry-pick the patch under test ─────────────────────────────────
 
@@ -93,12 +122,6 @@ fi
 
 log "Phase 3: Restarting Manila services"
 
-restore_clean_master() {
-    cd "$MANILA_DIR" || return 1
-    git reset --hard origin/master 2>&1 || return 1
-    sudo systemctl restart devstack@m-shr devstack@m-api devstack@m-sch 2>&1 || return 1
-}
-
 sudo systemctl restart devstack@m-shr devstack@m-api devstack@m-sch 2>&1 \
     || fail "Failed to restart Manila services" 2
 
@@ -110,7 +133,7 @@ HEALTH_START=$(date +%s)
 HEALTHY=false
 while [ $(($(date +%s) - HEALTH_START)) -lt "$TIMEOUT_RESTART" ]; do
     # Check if all Manila services report 'up'
-    SERVICE_STATUS=$(openstack share service list -f value -c State 2>/dev/null || echo "")
+    SERVICE_STATUS=$(timeout 30 openstack share service list -f value -c State 2>/dev/null || echo "")
     if [ -n "$SERVICE_STATUS" ]; then
         DOWN_COUNT=$(echo "$SERVICE_STATUS" | grep -cv "up" || true)
         if [ "$DOWN_COUNT" -eq 0 ]; then
@@ -122,12 +145,12 @@ while [ $(($(date +%s) - HEALTH_START)) -lt "$TIMEOUT_RESTART" ]; do
 done
 
 if [ "$HEALTHY" != "true" ]; then
-    openstack share service list 2>&1 | tee "${LOG_DIR}/share-service-list.txt" || true
+    timeout 30 openstack share service list 2>&1 | tee "${LOG_DIR}/share-service-list.txt" || true
     fail "Manila services did not become healthy within ${TIMEOUT_RESTART}s" 2
 fi
 
 log "Manila services are healthy"
-openstack share service list 2>&1 | tee "${LOG_DIR}/share-service-list.txt"
+timeout 30 openstack share service list 2>&1 | tee "${LOG_DIR}/share-service-list.txt"
 
 # ── Phase 4: Clean leftover test resources ────────────────────────────────────
 
@@ -135,7 +158,7 @@ log "Phase 4: Cleaning leftover test resources"
 
 # Delete any leftover shares (from previous test runs)
 CLEANUP_START=$(date +%s)
-for share_id in $(openstack share list -f value -c ID 2>/dev/null); do
+for share_id in $(timeout 30 openstack share list -f value -c ID 2>/dev/null); do
     log "Deleting leftover share: ${share_id}"
     openstack share delete "$share_id" --wait 2>/dev/null || true
     if [ $(($(date +%s) - CLEANUP_START)) -gt "$TIMEOUT_CLEANUP" ]; then
@@ -145,7 +168,7 @@ for share_id in $(openstack share list -f value -c ID 2>/dev/null); do
 done
 
 # Delete any leftover snapshots
-for snap_id in $(openstack share snapshot list -f value -c ID 2>/dev/null); do
+for snap_id in $(timeout 30 openstack share snapshot list -f value -c ID 2>/dev/null); do
     log "Deleting leftover snapshot: ${snap_id}"
     openstack share snapshot delete "$snap_id" --wait 2>/dev/null || true
     if [ $(($(date +%s) - CLEANUP_START)) -gt "$TIMEOUT_CLEANUP" ]; then

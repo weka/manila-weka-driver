@@ -2,14 +2,14 @@
 # =============================================================================
 # Weka Manila CI - One-Shot VM Setup
 #
-# Run once on a fresh Ubuntu 22.04 VM to install all dependencies,
+# Run once on a fresh Ubuntu 24.04 VM to install all dependencies,
 # create the stack user, deploy DevStack, configure nginx for log
 # hosting, and install systemd services.
 #
 # Usage: sudo bash setup.sh
 #
 # Prerequisites:
-#   - Ubuntu 22.04
+#   - Ubuntu 24.04
 #   - SSH key for Gerrit already present at /home/ubuntu/.ssh/id_ed25519
 #   - Environment variables set (or edit the defaults below):
 #       WEKA_API_SERVER, WEKA_API_PORT, WEKA_USERNAME, WEKA_PASSWORD, WEKA_ORGANIZATION
@@ -25,7 +25,8 @@ export WEKA_USERNAME="${WEKA_USERNAME:-admin}"
 export WEKA_PASSWORD="${WEKA_PASSWORD:?Set WEKA_PASSWORD environment variable}"
 export WEKA_ORGANIZATION="${WEKA_ORGANIZATION:-Root}"
 export CI_VM_IP="${CI_VM_IP:-$(hostname -I | awk '{print $1}')}"
-export CI_LOG_URL="http://${CI_VM_IP}/ci-logs"
+export CI_HOST_IP="$(hostname -I | awk '{print $1}')"
+export CI_LOG_URL="http://${CI_VM_IP}:8088"
 GERRIT_USER="${GERRIT_USER:-Assaf}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,6 +88,7 @@ chown -R stack:stack /opt/weka-ci
 log "Persisting CI environment"
 cat > /opt/weka-ci/ci-env <<EOF
 CI_VM_IP=${CI_VM_IP}
+CI_HOST_IP=${CI_HOST_IP}
 WEKA_API_SERVER=${WEKA_API_SERVER}
 WEKA_API_PORT=${WEKA_API_PORT}
 WEKA_USERNAME=${WEKA_USERNAME}
@@ -115,7 +117,7 @@ sudo -u stack ssh-keyscan -p 29418 review.opendev.org \
 log "Configuring nginx"
 cat > /etc/nginx/sites-available/weka-ci-logs <<'NGINX'
 server {
-    listen 80;
+    listen 8088;
     server_name _;
     root /var/www/ci-logs;
     location / {
@@ -162,11 +164,19 @@ CRON
 
 log "Deploying DevStack (this will take 20-40 minutes)"
 
-sudo -u stack bash -c "
+sudo -u stack \
+    CI_HOST_IP="${CI_HOST_IP}" \
+    CI_VM_IP="${CI_VM_IP}" \
+    WEKA_API_SERVER="${WEKA_API_SERVER}" \
+    WEKA_API_PORT="${WEKA_API_PORT}" \
+    WEKA_USERNAME="${WEKA_USERNAME}" \
+    WEKA_PASSWORD="${WEKA_PASSWORD}" \
+    WEKA_ORGANIZATION="${WEKA_ORGANIZATION}" \
+    bash -c "
     cd /opt/stack
     git clone -b stable/2025.1 https://opendev.org/openstack/devstack.git
     cd devstack
-    envsubst '\$CI_VM_IP \$WEKA_API_SERVER \$WEKA_API_PORT \$WEKA_USERNAME \$WEKA_PASSWORD \$WEKA_ORGANIZATION' < /opt/weka-ci/local.conf.template > local.conf
+    envsubst '\$CI_HOST_IP \$CI_VM_IP \$WEKA_API_SERVER \$WEKA_API_PORT \$WEKA_USERNAME \$WEKA_PASSWORD \$WEKA_ORGANIZATION' < /opt/weka-ci/local.conf.template > local.conf
     ./stack.sh
 "
 
@@ -193,7 +203,8 @@ sudo -u stack bash -c "
         --extra-specs share_backend_name=weka_wekafs \
         snapshot_support=true \
         create_share_from_snapshot_support=true \
-        revert_to_snapshot_support=true
+        revert_to_snapshot_support=true \
+        share_proto=WEKAFS
 
     echo '=== Share services ==='
     openstack share service list
