@@ -13,6 +13,7 @@
 #   - SSH key for Gerrit already present at /home/ubuntu/.ssh/id_ed25519
 #   - Environment variables set (or edit the defaults below):
 #       WEKA_API_SERVER, WEKA_API_PORT, WEKA_USERNAME, WEKA_PASSWORD, WEKA_ORGANIZATION
+#       CI_ALLOWED_CIDRS  (space-separated CIDRs for root log directory access)
 # =============================================================================
 
 set -euo pipefail
@@ -28,6 +29,7 @@ export CI_VM_IP="${CI_VM_IP:-$(hostname -I | awk '{print $1}')}"
 export CI_HOST_IP="$(hostname -I | awk '{print $1}')"
 export CI_LOG_URL="http://${CI_VM_IP}:8088"
 GERRIT_USER="${GERRIT_USER:-Assaf}"
+CI_ALLOWED_CIDRS="${CI_ALLOWED_CIDRS:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -115,11 +117,30 @@ sudo -u stack ssh-keyscan -p 29418 review.opendev.org \
 # ── 6. Configure nginx ───────────────────────────────────────────────────────
 
 log "Configuring nginx"
-cat > /etc/nginx/sites-available/weka-ci-logs <<'NGINX'
+
+# Build IP-restrict directives for root directory listing.
+# If CI_ALLOWED_CIDRS is set, only those CIDRs can browse /.
+# All deeper paths (linked from Gerrit) remain public.
+NGINX_ALLOW_RULES=""
+if [ -n "$CI_ALLOWED_CIDRS" ]; then
+    NGINX_ALLOW_RULES="        allow 127.0.0.1;\n"
+    for cidr in $CI_ALLOWED_CIDRS; do
+        NGINX_ALLOW_RULES="${NGINX_ALLOW_RULES}        allow ${cidr};\n"
+    done
+    NGINX_ALLOW_RULES="${NGINX_ALLOW_RULES}        deny all;"
+fi
+
+cat > /etc/nginx/sites-available/weka-ci-logs <<NGINX
 server {
     listen 8088;
     server_name _;
     root /var/www/ci-logs;
+    location = / {
+$(echo -e "${NGINX_ALLOW_RULES:-        # unrestricted (set CI_ALLOWED_CIDRS to restrict)")
+        autoindex on;
+        autoindex_exact_size off;
+        autoindex_localtime on;
+    }
     location / {
         autoindex on;
         autoindex_exact_size off;

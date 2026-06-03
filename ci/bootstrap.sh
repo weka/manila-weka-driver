@@ -130,6 +130,7 @@ ssh "${SSH_USER}@${VM_IP}" "
          WEKA_ORGANIZATION='Root' \
          CI_VM_IP='${VM_IP}' \
          GERRIT_USER='${GERRIT_USER}' \
+         CI_ALLOWED_CIDRS='${CI_ALLOWED_CIDRS:-}' \
          bash /tmp/manila-weka-driver-ci/setup.sh 2>&1 | tee /tmp/ci-setup.log
 "
 
