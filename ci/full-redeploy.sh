@@ -70,6 +70,15 @@ if [ -f "${DEVSTACK_DIR}/unstack.sh" ]; then
 fi
 
 sudo systemctl stop "devstack@*" 2>/dev/null || true
+
+# Kill orphaned manila daemons left by prior deploys. They survive
+# unstack/systemctl-stop by reparenting to init and accumulate across
+# redeploys (we found 40+ from 20+ generations dating back weeks). Each keeps
+# retrying do_setup with a stale in-memory config and races the live backend
+# for the same service identity -> intermittent "Capabilities filter didn't
+# succeed" share-build failures. [m] avoids matching this pkill's own cmdline.
+sudo pkill -9 -f 'venv/bin/[m]anila-' 2>/dev/null || true
+
 sudo umount -l /mnt/weka/* 2>/dev/null || true
 
 # Clean up but preserve the devstack repo to speed up re-clone
