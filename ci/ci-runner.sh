@@ -127,7 +127,10 @@ sudo systemctl restart devstack@m-shr devstack@m-api devstack@m-sch 2>&1 \
 
 # Wait for services to be healthy
 log "Waiting for Manila services to become healthy..."
+# devstack openrc/functions references unbound vars; tolerate under set -u
+set +u
 source "${DEVSTACK_DIR}/openrc" admin admin 2>/dev/null
+set -u
 
 HEALTH_START=$(date +%s)
 HEALTHY=false
