@@ -27,6 +27,9 @@ CI_DIR="/opt/weka-ci"
 DEVSTACK_DIR="/opt/stack/devstack"
 MANILA_DIR="/opt/stack/manila"
 TEMPEST_DIR="/opt/stack/tempest"
+WEKA_DRIVER_SRC="/opt/stack/manila-weka-driver/manila/share/drivers/weka"
+WEKA_DRIVER_DEST="${MANILA_DIR}/manila/share/drivers/weka"
+CONSTANTS_FILE="${MANILA_DIR}/manila/common/constants.py"
 LOG_BASE="/var/www/ci-logs"
 LOG_DIR="${LOG_BASE}/${CHANGE_NUM}/${PATCHSET_NUM}"
 
@@ -51,6 +54,12 @@ log "Revision: ${REVISION}"
 restore_clean_master() {
     cd "$MANILA_DIR" || return 1
     git reset --hard origin/master 2>&1 || return 1
+    # Keep the baseline driver in place so the backend works between jobs
+    # (a driver-adding change leaves tracked files that the reset removes).
+    ln -sfn "$WEKA_DRIVER_SRC" "$WEKA_DRIVER_DEST" 2>/dev/null || true
+    if ! grep -q "'WEKAFS'" "$CONSTANTS_FILE" 2>/dev/null; then
+        sed -i "s/'MAPRFS')/'MAPRFS', 'WEKAFS')/" "$CONSTANTS_FILE" 2>/dev/null || true
+    fi
     sudo systemctl restart devstack@m-shr devstack@m-api devstack@m-sch 2>&1 || return 1
 }
 
@@ -77,28 +86,12 @@ git fetch origin master 2>&1 || fail "Failed to fetch origin master"
 git reset --hard origin/master 2>&1 || fail "Failed to reset to origin/master"
 git clean -fdx 2>&1 || true
 
-# Sync dependencies after reset (master may have new requirements)
-log "Installing Manila dependencies..."
-sudo rm -rf manila.egg-info 2>/dev/null || true
-/opt/stack/data/venv/bin/pip install -e . -q 2>&1 \
-    || fail "Failed to install Manila dependencies"
-
-# Re-link the Weka driver into Manila's source tree (git reset removes it)
-WEKA_DRIVER_SRC="/opt/stack/manila-weka-driver/manila/share/drivers/weka"
-WEKA_DRIVER_DEST="${MANILA_DIR}/manila/share/drivers/weka"
-ln -sfn "$WEKA_DRIVER_SRC" "$WEKA_DRIVER_DEST" \
-    || fail "Failed to symlink Weka driver into Manila"
-
-# Re-patch WEKAFS into Manila's supported protocols (git reset reverts it)
-CONSTANTS_FILE="${MANILA_DIR}/manila/common/constants.py"
-if ! grep -q "'WEKAFS'" "$CONSTANTS_FILE" 2>/dev/null; then
-    sed -i "s/SUPPORTED_SHARE_PROTOCOLS = (/SUPPORTED_SHARE_PROTOCOLS = (/;s/'MAPRFS')/'MAPRFS', 'WEKAFS')/" \
-        "$CONSTANTS_FILE" \
-        || fail "Failed to patch WEKAFS into Manila constants"
-    log "Patched WEKAFS into SUPPORTED_SHARE_PROTOCOLS"
-fi
-
 # ── Phase 2: Cherry-pick the patch under test ─────────────────────────────────
+#
+# Cherry-pick onto clean master BEFORE injecting the driver. A change that
+# *adds* the driver (the upstream Weka driver review) brings the driver files
+# and the WEKAFS constants change itself; injecting the symlink/patch first
+# would make that cherry-pick conflict.
 
 log "Phase 2: Cherry-picking change ${CHANGE_NUM},${PATCHSET_NUM}"
 
@@ -111,12 +104,39 @@ git fetch "https://review.opendev.org/openstack/manila" \
     || fail "Failed to fetch patch from Gerrit"
 
 CHERRY_PICK_FAILED=false
-if ! git cherry-pick FETCH_HEAD 2>&1; then
+# cherry-pick creates a commit, so it needs a committer identity (the stack
+# user has none configured); supply one inline.
+if ! git -c user.email="weka-ci@weka.io" -c user.name="Weka Manila CI" \
+        cherry-pick FETCH_HEAD 2>&1; then
     log "WARNING: Cherry-pick failed (merge conflict)"
     git cherry-pick --abort 2>/dev/null || true
     git reset --hard origin/master 2>&1
     CHERRY_PICK_FAILED=true
 fi
+
+# ── Phase 2.5: Ensure the Weka driver + WEKAFS protocol are present ───────────
+#
+# If the change under test did not provide the driver (i.e. any change other
+# than the driver-adding review), inject it from the repo so the Weka backend
+# works at runtime. Patch WEKAFS into the supported protocols only if absent.
+
+if [ ! -f "${WEKA_DRIVER_DEST}/driver.py" ]; then
+    log "Driver not in change; linking from ${WEKA_DRIVER_SRC}"
+    ln -sfn "$WEKA_DRIVER_SRC" "$WEKA_DRIVER_DEST" \
+        || fail "Failed to symlink Weka driver into Manila"
+fi
+
+if ! grep -q "'WEKAFS'" "$CONSTANTS_FILE" 2>/dev/null; then
+    sed -i "s/'MAPRFS')/'MAPRFS', 'WEKAFS')/" "$CONSTANTS_FILE" \
+        || fail "Failed to patch WEKAFS into Manila constants"
+    log "Patched WEKAFS into SUPPORTED_SHARE_PROTOCOLS"
+fi
+
+# Install Manila (with whatever driver is now in place) into the venv
+log "Installing Manila dependencies..."
+sudo rm -rf manila.egg-info 2>/dev/null || true
+/opt/stack/data/venv/bin/pip install -e . -q 2>&1 \
+    || fail "Failed to install Manila dependencies"
 
 # ── Phase 3: Restart Manila services ──────────────────────────────────────────
 
