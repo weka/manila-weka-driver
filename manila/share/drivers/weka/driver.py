@@ -115,6 +115,19 @@ def _cidr_to_weka_ip(cidr_str):
         return cidr_str
 
 
+def _is_already_exists_error(exc):
+    """True if a Weka API error means the resource already exists.
+
+    Weka may reject a duplicate client-group rule with either a 409
+    conflict or a 400 whose message says the rule already exists; a
+    single IP can also be stored in a normalized CIDR/mask form that
+    our local de-dup check misses, so we rely on the error itself.
+    """
+    if isinstance(exc, weka_exc.WekaConflict):
+        return True
+    return 'already exist' in str(exc).lower()
+
+
 class WekaShareDriver(driver.ShareDriver):
     """Manila share driver for Weka storage using the WekaFS POSIX client.
 
@@ -681,7 +694,17 @@ class WekaShareDriver(driver.ShareDriver):
                 if r.get('ip')
             }
         if weka_ip not in existing_ips:
-            self._client.add_client_group_rule(cg['uid'], 'IP', weka_ip)
+            try:
+                self._client.add_client_group_rule(
+                    cg['uid'], 'IP', weka_ip)
+            except weka_exc.WekaApiError as exc:
+                # Idempotent re-apply during a reconcile: the IP rule
+                # may already be present under a normalized form we
+                # did not match, so tolerate "already exists" and
+                # continue to reconcile the export permission (e.g.
+                # an ro->rw level change).
+                if not _is_already_exists_error(exc):
+                    raise
 
         # Ensure the export permission exists with the right access level.
         perm = self._find_nfs_permission(fs_name, cg_name)
