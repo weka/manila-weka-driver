@@ -37,6 +37,12 @@ TIMEOUT_RESTART=300      # 5 min for service restart + health check
 TIMEOUT_CLEANUP=300      # 5 min for resource cleanup
 TIMEOUT_TEMPEST=2700     # 45 min for tempest
 
+# DevStack's venv bin isn't on the listener's PATH; tempest/stestr/subunit2html
+# live only there (openstack happens to also be installed system-wide, which is
+# why Phase 3 worked but tempest hit "command not found"). Put it first so all
+# bare tool invocations resolve.
+export PATH="/opt/stack/data/venv/bin:${PATH}"
+
 START_TIME=$(date +%s)
 
 # ── Setup logging ─────────────────────────────────────────────────────────────
