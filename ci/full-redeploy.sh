@@ -145,12 +145,15 @@ openstack share type create weka-nfs false \
     revert_to_snapshot_support=true \
     2>&1 || log "WARNING: Failed to create weka-nfs share type (may already exist)"
 
+# NOTE: do NOT set a share_proto extra-spec — CapabilitiesFilter matches it
+# against the driver's storage_protocol ('WEKAFS NFS'), so 'WEKAFS' fails the
+# filter (NoValidHost) and no wekafs share can be scheduled. Protocol is
+# chosen per-share at create time; the backend pin is share_backend_name.
 openstack share type create weka-wekafs false \
     --extra-specs share_backend_name=weka_wekafs \
     snapshot_support=true \
     create_share_from_snapshot_support=true \
     revert_to_snapshot_support=true \
-    share_proto=WEKAFS \
     2>&1 || log "WARNING: Failed to create weka-wekafs share type (may already exist)"
 
 # ── Configure tempest [share] ─────────────────────────────────────────────────
