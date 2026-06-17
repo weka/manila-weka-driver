@@ -17,7 +17,7 @@ SERVICE_HOST=${CI_HOST_IP}
 
 # ── Plugins ──────────────────────────────────────────────
 # Manila (DevStack plugin — installs manila, manilaclient, enables services)
-enable_plugin manila https://opendev.org/openstack/manila.git stable/2025.1
+enable_plugin manila https://opendev.org/openstack/manila.git master
 RECLONE=False
 
 # Manila tempest plugin
