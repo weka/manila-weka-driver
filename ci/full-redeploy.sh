@@ -144,6 +144,42 @@ openstack share type create weka-wekafs false \
     share_proto=WEKAFS \
     2>&1 || log "WARNING: Failed to create weka-wekafs share type (may already exist)"
 
+# ── Configure tempest [share] ─────────────────────────────────────────────────
+# DevStack's configure_tempest runs `rm -f tempest.conf` and regenerates it
+# AFTER the [[post-config|$TEMPEST_CONFIG]] block is applied, wiping our
+# [share] settings. Apply them here (post-stack) where they persist. Without
+# this, every manila test skips at setUpClass (defaults assume Neutron).
+TEMPEST_CONF="/opt/stack/tempest/etc/tempest.conf"
+if [ -f "$TEMPEST_CONF" ] && command -v crudini >/dev/null 2>&1; then
+    log "Configuring tempest [share]"
+    # DHSS=false, no Neutron: don't create share networks, or all tests skip.
+    crudini --set "$TEMPEST_CONF" share multi_backend true
+    crudini --set "$TEMPEST_CONF" share backend_names weka_nfs,weka_wekafs
+    crudini --set "$TEMPEST_CONF" share multitenancy_enabled false
+    crudini --set "$TEMPEST_CONF" share create_networks_when_multitenancy_enabled false
+    crudini --set "$TEMPEST_CONF" share default_share_type_name weka-nfs
+    # nfs only for now; WEKAFS protocol support in tempest is a follow-up.
+    crudini --set "$TEMPEST_CONF" share enable_protocols nfs
+    crudini --set "$TEMPEST_CONF" share enable_ip_rules_for_protocols nfs
+    crudini --set "$TEMPEST_CONF" share enable_ro_access_level_for_protocols nfs
+    crudini --set "$TEMPEST_CONF" share run_snapshot_tests true
+    crudini --set "$TEMPEST_CONF" share run_revert_to_snapshot_tests true
+    crudini --set "$TEMPEST_CONF" share run_shrink_tests true
+    crudini --set "$TEMPEST_CONF" share run_extend_tests true
+    crudini --set "$TEMPEST_CONF" share run_quota_tests true
+    crudini --set "$TEMPEST_CONF" share run_manage_unmanage_tests false
+    crudini --set "$TEMPEST_CONF" share run_share_group_tests false
+    crudini --set "$TEMPEST_CONF" share run_replication_tests false
+    crudini --set "$TEMPEST_CONF" share run_migration_tests false
+    crudini --set "$TEMPEST_CONF" share run_ipv6_tests false
+    crudini --set "$TEMPEST_CONF" share capability_snapshot_support true
+    crudini --set "$TEMPEST_CONF" share capability_create_share_from_snapshot_support true
+    crudini --set "$TEMPEST_CONF" share suppress_errors_in_cleanup true
+    crudini --set "$TEMPEST_CONF" share build_timeout 600
+else
+    log "WARNING: tempest.conf or crudini missing; skipping tempest [share] config"
+fi
+
 # Verify
 openstack share service list
 openstack share type list
