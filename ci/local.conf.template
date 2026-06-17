@@ -32,7 +32,10 @@ LOG_COLOR=False
 LOGDAYS=1
 
 # ── Manila configuration ─────────────────────────────────
-MANILA_DEFAULT_SHARE_TYPE_EXTRA_SPECS=""
+# Specs for the plugin-created default share type (weka-nfs). Do NOT include
+# driver_handles_share_servers here — the plugin passes it positionally and
+# python-manilaclient rejects it as a duplicate in --extra-specs.
+MANILA_DEFAULT_SHARE_TYPE_EXTRA_SPECS="share_backend_name=weka_nfs snapshot_support=true create_share_from_snapshot_support=true revert_to_snapshot_support=true"
 MANILA_ENABLED_BACKENDS=weka_nfs,weka_wekafs
 MANILA_DEFAULT_SHARE_TYPE=weka-nfs
 SHARE_DRIVER=manila.share.drivers.weka.driver.WekaShareDriver

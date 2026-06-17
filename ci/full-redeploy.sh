@@ -18,8 +18,10 @@ set -euo pipefail
 CI_DIR="/opt/weka-ci"
 DEVSTACK_DIR="/opt/stack/devstack"
 LOCK_FILE="/var/lib/weka-ci/runner.lock"
+LOG_FILE="/var/lib/weka-ci/redeploy.log"
 
-exec > >(tee /var/log/weka-ci-redeploy.log) 2>&1
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+exec > >(tee "$LOG_FILE") 2>&1
 
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*"; }
 
@@ -29,12 +31,31 @@ log "=== Starting full DevStack redeploy ==="
 
 log "Acquiring runner lock..."
 exec 9>"$LOCK_FILE"
-flock 9
+if ! flock -w 1800 9; then
+    log "FATAL: could not acquire runner lock within 1800s;"
+    log "a previous run may be stuck. Aborting redeploy."
+    exit 1
+fi
 log "Lock acquired"
+
+# Release the lock and bring the listener back on ANY exit, so a failed
+# redeploy never leaves the CI offline (it once stayed down for weeks).
+LISTENER_STOPPED=0
+cleanup() {
+    local rc=$?
+    if [ "$LISTENER_STOPPED" = "1" ]; then
+        log "Ensuring CI listener is running"
+        sudo systemctl start weka-manila-ci 2>/dev/null || true
+    fi
+    flock -u 9 2>/dev/null || true
+    exit "$rc"
+}
+trap cleanup EXIT
 
 # ── Stop the listener ─────────────────────────────────────────────────────────
 
 log "Stopping CI listener"
+LISTENER_STOPPED=1
 sudo systemctl stop weka-manila-ci 2>/dev/null || true
 
 # ── Tear down DevStack ────────────────────────────────────────────────────────
@@ -43,8 +64,9 @@ log "Tearing down DevStack"
 
 if [ -f "${DEVSTACK_DIR}/unstack.sh" ]; then
     cd "$DEVSTACK_DIR"
-    ./unstack.sh 2>&1 || true
-    ./clean.sh 2>&1 || true
+    # 9>&- closes the inherited lock fd so async children can't hold it
+    ./unstack.sh 9>&- 2>&1 || true
+    ./clean.sh 9>&- 2>&1 || true
 fi
 
 sudo systemctl stop "devstack@*" 2>/dev/null || true
@@ -76,21 +98,36 @@ export CI_HOST_IP="$(hostname -I | awk '{print $1}')"
 envsubst '$CI_HOST_IP $CI_VM_IP $WEKA_API_SERVER $WEKA_API_PORT $WEKA_USERNAME $WEKA_PASSWORD $WEKA_ORGANIZATION' < "${CI_DIR}/local.conf.template" > "${DEVSTACK_DIR}/local.conf"
 
 cd "$DEVSTACK_DIR"
-./stack.sh 2>&1
-STACK_RC=$?
+# 9>&- closes the inherited lock fd so stack.sh's async children
+# (outfilter.py, fifo readers) can't keep the runner lock held after a crash.
+STACK_RC=0
+./stack.sh 9>&- 2>&1 || STACK_RC=$?
 
 if [ "$STACK_RC" -ne 0 ]; then
     log "ERROR: stack.sh failed with exit code ${STACK_RC}"
     log "CI will not function until DevStack is fixed"
-    # Still restart listener so it can report infrastructure failures
-    sudo systemctl start weka-manila-ci 2>/dev/null || true
+    # Listener is restarted by the EXIT trap so it can report infra failures
     exit 1
+fi
+
+# Refresh job-side CI scripts from the freshly-deployed repo so the VM
+# never runs stale copies (a stale ci-runner.sh once broke every job).
+WEKA_REPO="/opt/stack/manila-weka-driver"
+if [ -d "${WEKA_REPO}/ci" ]; then
+    log "Refreshing CI scripts from ${WEKA_REPO}/ci"
+    for f in ci-runner.sh post-results.sh collect-logs.sh \
+             gerrit-listener.py tempest-include.txt local.conf.template; do
+        [ -f "${WEKA_REPO}/ci/${f}" ] && cp "${WEKA_REPO}/ci/${f}" "${CI_DIR}/"
+    done
+    chmod +x "${CI_DIR}"/*.sh "${CI_DIR}"/*.py 2>/dev/null || true
 fi
 
 # ── Create share types ────────────────────────────────────────────────────────
 
 log "Creating share types"
+set +u  # devstack openrc/functions uses unbound vars; tolerate during source
 source "${DEVSTACK_DIR}/openrc" admin admin
+set -u
 
 openstack share type create weka-nfs false \
     --extra-specs share_backend_name=weka_nfs \
@@ -117,7 +154,5 @@ openstack share pool list --detail
 log "Restarting CI listener"
 sudo systemctl start weka-manila-ci
 
-# Release lock
-flock -u 9
-
+# Lock released by the EXIT trap
 log "=== Full redeploy complete ==="
