@@ -33,7 +33,9 @@ if [ "$RESULT" = "SUCCESS" ]; then
     VOTE="+1"
 else
     STATUS_LINE="Build failed (${CI_NAME})"
-    VOTE="-1"
+    # Third-party CI reports failures as Verified 0 (informational), not -1.
+    # A non-gating CI must not veto a change. (per gouthamr, Manila core)
+    VOTE="0"
 fi
 
 COMMENT="${STATUS_LINE}

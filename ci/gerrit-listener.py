@@ -2,8 +2,8 @@
 """Weka Manila CI - Gerrit Event Listener
 
 Connects to review.opendev.org via SSH stream-events, watches for
-openstack/manila patchset-created events and "recheck" comments,
-and triggers CI runs serially.
+openstack/manila patchset-created events and "recheck"/"run-weka-ci"
+comments, and triggers CI runs serially.
 """
 
 import fcntl
@@ -145,7 +145,8 @@ def parse_event(event):
 
     if etype == "comment-added":
         comment = event.get("comment", "")
-        if re.search(r"\brecheck\b", comment, re.IGNORECASE):
+        # "recheck" (re-runs all CIs) or "run-weka-ci" (Weka CI only).
+        if re.search(r"\b(?:recheck|run-weka-ci)\b", comment, re.IGNORECASE):
             ps = event.get("patchSet", {})
             return (
                 str(change["number"]),
