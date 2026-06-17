@@ -159,34 +159,40 @@ openstack share type create weka-wekafs false \
 # [share] settings. Apply them here (post-stack) where they persist. Without
 # this, every manila test skips at setUpClass (defaults assume Neutron).
 TEMPEST_CONF="/opt/stack/tempest/etc/tempest.conf"
-if [ -f "$TEMPEST_CONF" ] && command -v crudini >/dev/null 2>&1; then
+if [ -f "$TEMPEST_CONF" ]; then
     log "Configuring tempest [share]"
+    # Use devstack's iniset (crudini isn't installed on the CI VM). devstack
+    # functions reference unbound vars, so relax set -u while using them.
+    set +u
+    source "${DEVSTACK_DIR}/functions"
     # DHSS=false, no Neutron: don't create share networks, or all tests skip.
-    crudini --set "$TEMPEST_CONF" share multi_backend true
-    crudini --set "$TEMPEST_CONF" share backend_names weka_nfs,weka_wekafs
-    crudini --set "$TEMPEST_CONF" share multitenancy_enabled false
-    crudini --set "$TEMPEST_CONF" share create_networks_when_multitenancy_enabled false
-    crudini --set "$TEMPEST_CONF" share default_share_type_name weka-nfs
-    # nfs only for now; WEKAFS protocol support in tempest is a follow-up.
-    crudini --set "$TEMPEST_CONF" share enable_protocols nfs
-    crudini --set "$TEMPEST_CONF" share enable_ip_rules_for_protocols nfs
-    crudini --set "$TEMPEST_CONF" share enable_ro_access_level_for_protocols nfs
-    crudini --set "$TEMPEST_CONF" share run_snapshot_tests true
-    crudini --set "$TEMPEST_CONF" share run_revert_to_snapshot_tests true
-    crudini --set "$TEMPEST_CONF" share run_shrink_tests true
-    crudini --set "$TEMPEST_CONF" share run_extend_tests true
-    crudini --set "$TEMPEST_CONF" share run_quota_tests true
-    crudini --set "$TEMPEST_CONF" share run_manage_unmanage_tests false
-    crudini --set "$TEMPEST_CONF" share run_share_group_tests false
-    crudini --set "$TEMPEST_CONF" share run_replication_tests false
-    crudini --set "$TEMPEST_CONF" share run_migration_tests false
-    crudini --set "$TEMPEST_CONF" share run_ipv6_tests false
-    crudini --set "$TEMPEST_CONF" share capability_snapshot_support true
-    crudini --set "$TEMPEST_CONF" share capability_create_share_from_snapshot_support true
-    crudini --set "$TEMPEST_CONF" share suppress_errors_in_cleanup true
-    crudini --set "$TEMPEST_CONF" share build_timeout 600
+    iniset "$TEMPEST_CONF" share multi_backend true
+    iniset "$TEMPEST_CONF" share backend_names weka_nfs,weka_wekafs
+    iniset "$TEMPEST_CONF" share multitenancy_enabled false
+    iniset "$TEMPEST_CONF" share create_networks_when_multitenancy_enabled false
+    iniset "$TEMPEST_CONF" share default_share_type_name weka-nfs
+    # nfs is the default protocol; WEKAFS is validated separately (upstream
+    # tempest has no wekafs test class to drive it from enable_protocols).
+    iniset "$TEMPEST_CONF" share enable_protocols nfs
+    iniset "$TEMPEST_CONF" share enable_ip_rules_for_protocols nfs
+    iniset "$TEMPEST_CONF" share enable_ro_access_level_for_protocols nfs
+    iniset "$TEMPEST_CONF" share run_snapshot_tests true
+    iniset "$TEMPEST_CONF" share run_revert_to_snapshot_tests true
+    iniset "$TEMPEST_CONF" share run_shrink_tests true
+    iniset "$TEMPEST_CONF" share run_extend_tests true
+    iniset "$TEMPEST_CONF" share run_quota_tests true
+    iniset "$TEMPEST_CONF" share run_manage_unmanage_tests false
+    iniset "$TEMPEST_CONF" share run_share_group_tests false
+    iniset "$TEMPEST_CONF" share run_replication_tests false
+    iniset "$TEMPEST_CONF" share run_migration_tests false
+    iniset "$TEMPEST_CONF" share run_ipv6_tests false
+    iniset "$TEMPEST_CONF" share capability_snapshot_support true
+    iniset "$TEMPEST_CONF" share capability_create_share_from_snapshot_support true
+    iniset "$TEMPEST_CONF" share suppress_errors_in_cleanup true
+    iniset "$TEMPEST_CONF" share build_timeout 600
+    set -u
 else
-    log "WARNING: tempest.conf or crudini missing; skipping tempest [share] config"
+    log "WARNING: tempest.conf missing; skipping tempest [share] config"
 fi
 
 # Verify
