@@ -12,6 +12,8 @@ Manila driver operation.
 | `delete_share` | `/fileSystems` | GET | Name lookup |
 | `delete_share` | `/nfsPermissions` | GET | Find permissions to remove |
 | `delete_share` | `/nfsPermissions/{uid}` | DELETE | Remove each permission |
+| `delete_share` | `/clientGroups` | GET | Find per-rule client groups |
+| `delete_share` | `/clientGroups/{uid}` | DELETE | Remove per-rule client groups |
 | `delete_share` | `/fileSystems/{uid}` | DELETE | Delete filesystem |
 | `extend_share` | `/fileSystems/{uid}` | PUT | Update `totalCapacity` |
 | `shrink_share` | `/fileSystems/{uid}` | GET | Check used capacity |
@@ -43,12 +45,18 @@ Manila driver operation.
 
 | Manila Operation | Weka API Endpoint | Method | Notes |
 |-----------------|-------------------|--------|-------|
-| `update_access` (NFS add) | `/clientGroups` | POST | One group per rule |
-| `update_access` (NFS add) | `/clientGroups/{uid}/rules` | POST | IP rule |
-| `update_access` (NFS add) | `/nfsPermissions` | POST | RW or RO |
-| `update_access` (NFS del) | `/nfsPermissions` | GET | Find by FS+rule ID |
-| `update_access` (NFS del) | `/nfsPermissions/{uid}` | DELETE | |
-| `update_access` (WEKAFS) | *(no Weka API calls)* | — | All rules rejected with `error` state; see [known-issues.md §6](known-issues.md#6-wekafs-shares-do-not-support-manila-access-rules) |
+| `update_access` (NFS add) | `/clientGroups` | GET | Check for existing group (idempotent) |
+| `update_access` (NFS add) | `/clientGroups` | POST | Create group if not present |
+| `update_access` (NFS add) | `/clientGroups/{uid}` | GET | Fetch existing IP rules |
+| `update_access` (NFS add) | `/clientGroups/{uid}/rules` | POST | Add IP rule if not present |
+| `update_access` (NFS add) | `/nfsPermissions` | GET | Check for existing permission |
+| `update_access` (NFS add) | `/nfsPermissions` | POST | Create or recreate RW/RO permission |
+| `update_access` (NFS add) | `/nfsPermissions/{uid}` | DELETE | Recreate if access level changed |
+| `update_access` (NFS del) | `/nfsPermissions` | GET | Find permissions by FS+rule ID |
+| `update_access` (NFS del) | `/nfsPermissions/{uid}` | DELETE | Remove permission |
+| `update_access` (NFS del) | `/clientGroups` | GET | Find client group by name |
+| `update_access` (NFS del) | `/clientGroups/{uid}` | DELETE | Remove per-rule client group |
+| `update_access` (WEKAFS) | *(no Weka API calls)* | — | All rules accepted as no-op (`active`); see [known-issues.md §6](known-issues.md#6-wekafs-shares-do-not-support-manila-access-rules) |
 
 ## Driver Setup
 
@@ -122,7 +130,8 @@ with (D) are driver-critical; (S) are stubs included for SDK completeness.
 - DELETE `/nfsPermissions/{uid}` (D)
 - GET/POST `/clientGroups` (D)
 - POST `/clientGroups/{uid}/rules` (D)
-- DELETE `/clientGroups/{uid}` (S)
+- GET `/clientGroups/{uid}` (D)
+- DELETE `/clientGroups/{uid}` (D)
 
 ### Snapshots
 - GET/POST `/snapshots` (D)
