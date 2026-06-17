@@ -63,7 +63,7 @@ echo ""
 echo "## Weka Backend"
 ssh_cmd "
 if [ -f /etc/manila/manila.conf ]; then
-    echo \"  API Server:  \$(grep -m1 weka_api_url /etc/manila/manila.conf 2>/dev/null | awk -F'=' '{print \$2}' | xargs || echo 'N/A')\"
+    echo \"  API Server:  \$(grep -m1 weka_api_server /etc/manila/manila.conf 2>/dev/null | awk -F'=' '{print \$2}' | xargs || echo 'N/A')\"
 fi
 # Try environment from service file
 WEKA_HOST=\$(grep -oP 'WEKA_API_SERVER=\K[^ ]+' /etc/systemd/system/weka-manila-ci.service 2>/dev/null || echo '')
