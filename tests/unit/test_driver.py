@@ -1168,6 +1168,69 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
         drv._client.delete_client_group.assert_any_call('cg-uid-1')
         drv._client.delete_client_group.assert_any_call('cg-uid-2')
 
+    def test_apply_nfs_rule_tolerates_existing_ip_rule(self):
+        """Idempotent re-apply: add_client_group_rule 400 'Rule already
+        exists' is tolerated; permission reconcile (ro->rw) still runs."""
+        share = fakes.fake_share(proto='NFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='2.2.2.2', access_level='rw')
+        cg_name = 'manila-{}-{}'.format(
+            share['id'][:8], rule['access_id'][:8])
+        cg = fakes.fake_client_group(name=cg_name)
+        # Existing permission is RO; rule requests RW — reconcile must run.
+        perm = fakes.fake_nfs_permission(
+            fs_name=fakes.FAKE_FS_NAME,
+            cg_name=cg_name,
+            permission_type='RO')
+
+        drv = self._make_driver()
+        drv._client.list_client_groups.return_value = [cg]
+        # existing_ips set is empty (normalized form not matched locally).
+        drv._client.get_client_group.return_value = (
+            fakes.fake_client_group_detail(
+                uid=cg['uid'], name=cg_name, rules=[]))
+        drv._client.list_nfs_permissions.return_value = [perm]
+        # Weka returns 400 "Rule already exists" on the add call.
+        drv._client.add_client_group_rule.side_effect = (
+            weka_exc.WekaApiError(
+                status_code=400,
+                reason='/nfs/clientGroups/x/rules: Rule already exists'))
+
+        # Must not raise; result for this rule must be 'active'.
+        result = drv._update_nfs_access(share, [rule], [])
+
+        self.assertEqual('active', result[rule['access_id']]['state'])
+        # Permission reconcile (ro->rw) must have run despite the add error.
+        drv._client.delete_nfs_permission.assert_called_once_with(
+            fakes.FAKE_PERM_UID)
+        drv._client.create_nfs_permission.assert_called_once()
+        _, kwargs = drv._client.create_nfs_permission.call_args
+        self.assertEqual('RW', kwargs.get('access_type'))
+
+    def test_apply_nfs_rule_reraises_other_add_errors(self):
+        """Non-benign add errors (not 'already exists') are re-raised."""
+        share = fakes.fake_share(proto='NFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='3.3.3.3')
+        cg_name = 'manila-{}-{}'.format(
+            share['id'][:8], rule['access_id'][:8])
+        cg = fakes.fake_client_group(name=cg_name)
+
+        drv = self._make_driver()
+        drv._client.list_client_groups.return_value = [cg]
+        drv._client.get_client_group.return_value = (
+            fakes.fake_client_group_detail(
+                uid=cg['uid'], name=cg_name, rules=[]))
+        drv._client.list_nfs_permissions.return_value = []
+        drv._client.add_client_group_rule.side_effect = (
+            weka_exc.WekaApiError(
+                status_code=400,
+                reason='bad request: invalid something'))
+
+        result = drv._update_nfs_access(share, [rule], [])
+
+        self.assertEqual('error', result[rule['access_id']]['state'])
+
     # ------------------------------------------------------------------
     # _get_backends
     # ------------------------------------------------------------------
