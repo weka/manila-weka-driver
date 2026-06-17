@@ -95,11 +95,11 @@ if [ ! -d "$DEVSTACK_DIR" ]; then
     sudo mkdir -p /opt/stack
     sudo chown stack:stack /opt/stack
     cd /opt/stack
-    git clone -b stable/2025.1 https://opendev.org/openstack/devstack.git
+    git clone -b master https://opendev.org/openstack/devstack.git
 else
     cd "$DEVSTACK_DIR"
     git fetch origin
-    git reset --hard origin/stable/2025.1
+    git reset --hard origin/master
 fi
 
 # Install local.conf from template, substituting environment variables
