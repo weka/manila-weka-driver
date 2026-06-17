@@ -20,7 +20,7 @@ CI_NAME="Weka Manila CI"
 GERRIT_HOST="review.opendev.org"
 GERRIT_PORT=29418
 GERRIT_USER="${GERRIT_USER:-Assaf}"
-LOG_BASE_URL="${CI_LOG_URL:-http://$(hostname -I | awk '{print $1}'):8088}"
+LOG_BASE_URL="${CI_LOG_URL:-http://${CI_VM_IP:-$(hostname -I | awk "{print \$1}")}:8088}"
 LOG_URL="${LOG_BASE_URL}/${CHANGE_NUM}/${PATCHSET_NUM}/"
 
 # Set to "true" once the Manila team grants voting rights
