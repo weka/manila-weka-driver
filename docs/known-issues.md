@@ -236,7 +236,34 @@ Manila `max_over_subscription_ratio` option is configured.
 
 ---
 
-## 8. No Quality of Service (QoS) Support
+## 8. ~~NFS Client-Group Leak Under Repeated Access-Rule Changes~~ (Fixed)
+
+**Affects:** NFS protocol shares only. **Resolved in current version.**
+
+**Description (historical):**
+The original `update_access` implementation called
+`create_client_group` unconditionally on every add-rule call, and
+`_remove_nfs_rule` deleted only the NFS permission without deleting the
+client group. Over many add/delete cycles, orphan client groups
+accumulated on the Weka cluster until the cluster hit its per-cluster
+NFS client-group cap, causing all subsequent `ip` rule additions to
+fail with:
+
+```
+Weka API error 400: /nfs/clientGroups: An attempt was made to add more
+NFS client groups than the system supports
+```
+
+**Resolution:**
+`_apply_nfs_rule` now performs a get-or-create for the client group
+(reusing an existing one if present), and both `_remove_nfs_rule` and
+`_remove_all_nfs_permissions` delete the per-rule client group together
+with the NFS permission. Access-level updates (e.g. RO → RW) are
+handled idempotently by recreating only the permission, not the group.
+
+---
+
+## 9. No Quality of Service (QoS) Support
 
 **Affects:** All shares.
 

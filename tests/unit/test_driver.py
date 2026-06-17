@@ -657,6 +657,9 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
             fakes.fake_filesystem())
+        # No pre-existing client groups or permissions — new rule path.
+        drv._client.list_client_groups.return_value = []
+        drv._client.list_nfs_permissions.return_value = []
         drv._client.create_client_group.return_value = (
             fakes.fake_client_group())
         drv._client.add_client_group_rule.return_value = {}
@@ -666,7 +669,7 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(access_type='ip',
                                       access_to='192.168.1.0/24')
-        drv.update_access(
+        result = drv.update_access(
             context=None, share=share,
             access_rules=[], add_rules=[rule], delete_rules=[],
             update_rules=[],
@@ -674,11 +677,14 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
 
         drv._client.create_client_group.assert_called_once()
         drv._client.create_nfs_permission.assert_called_once()
+        self.assertEqual('active', result[rule['access_id']]['state'])
 
     def test_update_access_nfs_full_sync(self):
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
             fakes.fake_filesystem())
+        drv._client.list_client_groups.return_value = []
+        drv._client.list_nfs_permissions.return_value = []
         drv._client.create_client_group.return_value = (
             fakes.fake_client_group())
         drv._client.add_client_group_rule.return_value = {}
@@ -688,7 +694,7 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(access_type='ip',
                                       access_to='10.0.0.0/24')
-        # Full sync: access_rules populated, add/delete empty
+        # Full sync: access_rules populated, add/delete/update empty
         drv.update_access(
             context=None, share=share,
             access_rules=[rule], add_rules=[], delete_rules=[],
@@ -884,18 +890,23 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
     def test_remove_nfs_rule_removes_matching_permission(self):
         drv = self._make_driver()
         rule_id = 'abcdefgh-1234-5678-0000-111111111111'
+        cg_name = 'manila-shareuui-abcdefgh'
         # cg_name embeds the first 8 chars of the rule access_id.
         perm = fakes.fake_nfs_permission(
             fs_name=fakes.FAKE_FS_NAME,
-            cg_name='manila-shareuui-abcdefgh',
+            cg_name=cg_name,
         )
+        cg = fakes.fake_client_group(name=cg_name)
         drv._client.list_nfs_permissions.return_value = [perm]
+        drv._client.list_client_groups.return_value = [cg]
         rule = fakes.fake_access_rule(rule_id=rule_id)
 
         drv._remove_nfs_rule(fakes.FAKE_FS_NAME, rule)
 
         drv._client.delete_nfs_permission.assert_called_once_with(
             fakes.FAKE_PERM_UID)
+        drv._client.delete_client_group.assert_called_once_with(
+            fakes.FAKE_CG_UID)
 
     def test_remove_nfs_rule_skips_different_filesystem(self):
         drv = self._make_driver()
@@ -905,6 +916,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
             cg_name='manila-shareuui-abcdefgh',
         )
         drv._client.list_nfs_permissions.return_value = [perm]
+        drv._client.list_client_groups.return_value = []
         rule = fakes.fake_access_rule(rule_id=rule_id)
 
         drv._remove_nfs_rule(fakes.FAKE_FS_NAME, rule)
@@ -920,6 +932,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
             cg_name='manila-shareuui-xxxxxxxx',
         )
         drv._client.list_nfs_permissions.return_value = [perm]
+        drv._client.list_client_groups.return_value = []
         rule = fakes.fake_access_rule(rule_id=rule_id)
 
         drv._remove_nfs_rule(fakes.FAKE_FS_NAME, rule)
@@ -929,6 +942,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
     def test_remove_nfs_rule_empty_permissions(self):
         drv = self._make_driver()
         drv._client.list_nfs_permissions.return_value = []
+        drv._client.list_client_groups.return_value = []
         rule = fakes.fake_access_rule()
 
         # Should not raise, nothing to delete.
@@ -942,13 +956,17 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
     def test_remove_all_nfs_permissions_deletes_matching(self):
         drv = self._make_driver()
         perm1 = fakes.fake_nfs_permission(
-            uid='perm-uid-0001', fs_name=fakes.FAKE_FS_NAME)
+            uid='perm-uid-0001', fs_name=fakes.FAKE_FS_NAME,
+            cg_name='manila-share111-rule1111')
         perm2 = fakes.fake_nfs_permission(
-            uid='perm-uid-0002', fs_name=fakes.FAKE_FS_NAME)
+            uid='perm-uid-0002', fs_name=fakes.FAKE_FS_NAME,
+            cg_name='manila-share222-rule2222')
         perm_other = fakes.fake_nfs_permission(
             uid='perm-uid-0003', fs_name='other-filesystem')
         drv._client.list_nfs_permissions.return_value = [
             perm1, perm2, perm_other]
+        # No pre-existing client groups (simplifies the delete path).
+        drv._client.list_client_groups.return_value = []
 
         drv._remove_all_nfs_permissions(fakes.FAKE_FS_NAME)
 
@@ -959,6 +977,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
     def test_remove_all_nfs_permissions_empty(self):
         drv = self._make_driver()
         drv._client.list_nfs_permissions.return_value = []
+        drv._client.list_client_groups.return_value = []
 
         # Should not raise.
         drv._remove_all_nfs_permissions(fakes.FAKE_FS_NAME)
@@ -968,12 +987,186 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
         drv = self._make_driver()
         perm = fakes.fake_nfs_permission(fs_name=fakes.FAKE_FS_NAME)
         drv._client.list_nfs_permissions.return_value = [perm]
+        drv._client.list_client_groups.return_value = []
         from manila.share.drivers.weka import exceptions as weka_exc
         drv._client.delete_nfs_permission.side_effect = (
             weka_exc.WekaNotFound(reason='already gone'))
 
         # WekaNotFound should be swallowed, not re-raised.
         drv._remove_all_nfs_permissions(fakes.FAKE_FS_NAME)
+
+    # ------------------------------------------------------------------
+    # _apply_nfs_rule / idempotency / access-level update
+    # ------------------------------------------------------------------
+
+    def test_apply_nfs_rule_returns_active_state(self):
+        """add path returns {'state':'active'} for a valid ip rule."""
+        drv = self._make_driver()
+        drv._client.list_client_groups.return_value = []
+        drv._client.list_nfs_permissions.return_value = []
+        drv._client.create_client_group.return_value = (
+            fakes.fake_client_group())
+
+        share = fakes.fake_share(proto='NFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='10.1.1.1')
+        result = drv._update_nfs_access(share, [rule], [])
+
+        self.assertEqual('active', result[rule['access_id']]['state'])
+        drv._client.create_client_group.assert_called_once()
+        drv._client.create_nfs_permission.assert_called_once()
+
+    def test_apply_nfs_rule_reuses_existing_client_group(self):
+        """add path REUSES existing CG — create_client_group not called."""
+        share = fakes.fake_share(proto='NFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='10.2.2.2')
+        cg_name = 'manila-{}-{}'.format(
+            share['id'][:8], rule['access_id'][:8])
+        cg = fakes.fake_client_group(name=cg_name)
+
+        drv = self._make_driver()
+        # CG already exists; get_client_group returns no existing IP rules.
+        drv._client.list_client_groups.return_value = [cg]
+        drv._client.get_client_group.return_value = (
+            fakes.fake_client_group_detail(
+                uid=cg['uid'], name=cg_name, rules=[]))
+        drv._client.list_nfs_permissions.return_value = []
+
+        result = drv._update_nfs_access(share, [rule], [])
+
+        drv._client.create_client_group.assert_not_called()
+        drv._client.add_client_group_rule.assert_called_once()
+        self.assertEqual('active', result[rule['access_id']]['state'])
+
+    def test_apply_nfs_rule_idempotent_existing_ip(self):
+        """Idempotent re-add: existing CG+IP → add_client_group_rule not
+        called."""
+        from manila.share.drivers.weka.driver import _cidr_to_weka_ip
+        share = fakes.fake_share(proto='NFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='10.3.3.3')
+        cg_name = 'manila-{}-{}'.format(
+            share['id'][:8], rule['access_id'][:8])
+        cg = fakes.fake_client_group(name=cg_name)
+        weka_ip = _cidr_to_weka_ip('10.3.3.3')
+
+        drv = self._make_driver()
+        drv._client.list_client_groups.return_value = [cg]
+        # get_client_group returns the IP already present.
+        drv._client.get_client_group.return_value = (
+            fakes.fake_client_group_detail(
+                uid=cg['uid'], name=cg_name,
+                rules=[{'ip': weka_ip}]))
+        drv._client.list_nfs_permissions.return_value = []
+
+        drv._update_nfs_access(share, [rule], [])
+
+        drv._client.add_client_group_rule.assert_not_called()
+
+    def test_apply_nfs_rule_access_level_change(self):
+        """access-level change: existing RO permission recreated as RW."""
+        share = fakes.fake_share(proto='NFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='10.4.4.4', access_level='rw')
+        cg_name = 'manila-{}-{}'.format(
+            share['id'][:8], rule['access_id'][:8])
+        cg = fakes.fake_client_group(name=cg_name)
+        from manila.share.drivers.weka.driver import _cidr_to_weka_ip
+        weka_ip = _cidr_to_weka_ip('10.4.4.4')
+
+        # Existing permission is RO; rule requests RW.
+        perm = fakes.fake_nfs_permission(
+            fs_name=fakes.FAKE_FS_NAME,
+            cg_name=cg_name,
+            permission_type='RO')
+
+        drv = self._make_driver()
+        drv._client.list_client_groups.return_value = [cg]
+        drv._client.get_client_group.return_value = (
+            fakes.fake_client_group_detail(
+                uid=cg['uid'], name=cg_name,
+                rules=[{'ip': weka_ip}]))
+        drv._client.list_nfs_permissions.return_value = [perm]
+
+        drv._update_nfs_access(share, [rule], [])
+
+        drv._client.delete_nfs_permission.assert_called_once_with(
+            fakes.FAKE_PERM_UID)
+        drv._client.create_nfs_permission.assert_called_once()
+        _, kwargs = drv._client.create_nfs_permission.call_args
+        self.assertEqual('RW', kwargs.get('access_type'))
+
+    def test_update_rules_path_applied_not_ignored(self):
+        """update_rules path: rule reaches 'active', not treated as
+        full-sync."""
+        drv = self._make_driver()
+        drv._client.list_client_groups.return_value = []
+        drv._client.list_nfs_permissions.return_value = []
+        drv._client.create_client_group.return_value = (
+            fakes.fake_client_group())
+
+        share = fakes.fake_share(proto='NFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='10.5.5.5', access_level='rw')
+        result = drv.update_access(
+            context=None, share=share,
+            access_rules=[],
+            add_rules=[],
+            delete_rules=[],
+            update_rules=[rule],
+        )
+
+        self.assertEqual('active', result[rule['access_id']]['state'])
+        drv._client.create_client_group.assert_called_once()
+
+    def test_remove_nfs_rule_leak_fix_deletes_client_group(self):
+        """LEAK FIX on rule delete: permission AND client group deleted."""
+        rule_id = 'abcdefgh-1234-5678-0000-222222222222'
+        cg_name = 'manila-shareuui-abcdefgh'
+        cg = fakes.fake_client_group(
+            uid='cg-uid-leak', name=cg_name)
+        perm = fakes.fake_nfs_permission(
+            uid='perm-uid-leak',
+            fs_name=fakes.FAKE_FS_NAME,
+            cg_name=cg_name)
+
+        drv = self._make_driver()
+        drv._client.list_nfs_permissions.return_value = [perm]
+        drv._client.list_client_groups.return_value = [cg]
+        rule = fakes.fake_access_rule(rule_id=rule_id)
+
+        drv._remove_nfs_rule(fakes.FAKE_FS_NAME, rule)
+
+        drv._client.delete_nfs_permission.assert_called_once_with(
+            'perm-uid-leak')
+        drv._client.delete_client_group.assert_called_once_with(
+            'cg-uid-leak')
+
+    def test_remove_all_nfs_permissions_leak_fix_deletes_client_groups(self):
+        """LEAK FIX on share delete: both permissions AND client groups
+        removed."""
+        cg1_name = 'manila-share111-rule1111'
+        cg2_name = 'manila-share222-rule2222'
+        perm1 = fakes.fake_nfs_permission(
+            uid='perm-uid-1', fs_name=fakes.FAKE_FS_NAME,
+            cg_name=cg1_name)
+        perm2 = fakes.fake_nfs_permission(
+            uid='perm-uid-2', fs_name=fakes.FAKE_FS_NAME,
+            cg_name=cg2_name)
+        cg1 = fakes.fake_client_group(uid='cg-uid-1', name=cg1_name)
+        cg2 = fakes.fake_client_group(uid='cg-uid-2', name=cg2_name)
+
+        drv = self._make_driver()
+        drv._client.list_nfs_permissions.return_value = [perm1, perm2]
+        drv._client.list_client_groups.return_value = [cg1, cg2]
+
+        drv._remove_all_nfs_permissions(fakes.FAKE_FS_NAME)
+
+        self.assertEqual(2, drv._client.delete_nfs_permission.call_count)
+        self.assertEqual(2, drv._client.delete_client_group.call_count)
+        drv._client.delete_client_group.assert_any_call('cg-uid-1')
+        drv._client.delete_client_group.assert_any_call('cg-uid-2')
 
     # ------------------------------------------------------------------
     # _get_backends

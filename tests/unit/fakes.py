@@ -99,19 +99,31 @@ def fake_organization(uid=FAKE_ORG_UID, name='TestOrg',
 def fake_nfs_permission(uid=FAKE_PERM_UID, fs_name=FAKE_FS_NAME,
                         cg_uid=FAKE_CG_UID,
                         cg_name='manila-abcd1234-efgh5678',
-                        path='/', access_type='RW'):
+                        path='/', access_type='RW',
+                        permission_type=None):
     return {
         'uid': uid,
-        'filesystem': fs_name,   # Weka v5: filesystem name (not UID)
-        'group': cg_name,        # Weka v5: client group name
+        'filesystem': fs_name,    # Weka v5: filesystem name (not UID)
+        'group': cg_name,         # Weka v5: client group name
         'clientGroupId': cg_uid,
         'path': path,
         'accessType': access_type,
+        # permission_type is what the driver checks for access-level updates.
+        'permission_type': (permission_type
+                            if permission_type is not None
+                            else access_type),
     }
 
 
 def fake_client_group(uid=FAKE_CG_UID, name='manila-abcd1234-efgh5678'):
     return {'uid': uid, 'name': name}
+
+
+def fake_client_group_detail(uid=FAKE_CG_UID,
+                             name='manila-abcd1234-efgh5678',
+                             rules=None):
+    """Detailed client group as returned by get_client_group()."""
+    return {'uid': uid, 'name': name, 'rules': rules or []}
 
 
 def fake_capacity(total_bytes=100 * 1024 ** 3, used_bytes=30 * 1024 ** 3):

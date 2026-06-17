@@ -585,28 +585,35 @@ class WekaShareDriver(driver.ShareDriver):
                       delete_rules, update_rules=None, share_server=None):
         """Update access rules for a share.
 
-        Supports both full-sync (all rules in access_rules, empty add/delete)
-        and incremental (add_rules + delete_rules) modes.
+        Supports full-sync (all rules in access_rules, empty
+        add/delete/update) and incremental (add/delete/update) modes.
 
-        For WEKAFS protocol: access is controlled via Weka user permissions
-        and mount tokens (ip rules map to token scope).
-        For NFS protocol: rules translate to Weka NFS client group entries.
+        For WEKAFS protocol: access is controlled via Weka filesystem
+        authentication and mount tokens; rules are accepted as a no-op.
+        For NFS protocol: rules translate to Weka NFS client groups and
+        export permissions.
         """
         share_proto = share['share_proto'].upper()
-        rule_state_map = {}
 
-        # Full-sync mode: treat all access_rules as add_rules.
-        if not add_rules and not delete_rules:
-            add_rules = access_rules
+        add_rules = list(add_rules or [])
+        delete_rules = list(delete_rules or [])
+        update_rules = list(update_rules or [])
+
+        # Full-sync mode: Manila passes the full rule set in access_rules
+        # with empty add/delete/update lists.
+        if not add_rules and not delete_rules and not update_rules:
+            add_rules = list(access_rules or [])
+
+        # Access-level updates re-apply through the same idempotent path
+        # as additions.
+        apply_rules = add_rules + update_rules
 
         if share_proto == _NFS_PROTO:
-            rule_state_map = self._update_nfs_access(
-                share, add_rules, delete_rules)
+            return self._update_nfs_access(share, apply_rules, delete_rules)
         elif share_proto == _WEKAFS_PROTO:
-            rule_state_map = self._update_wekafs_access(
-                share, add_rules, delete_rules)
-
-        return rule_state_map
+            return self._update_wekafs_access(
+                share, apply_rules, delete_rules)
+        return {}
 
     def _update_nfs_access(self, share, add_rules, delete_rules):
         """Add / delete NFS permissions on the Weka cluster."""
@@ -622,29 +629,9 @@ class WekaShareDriver(driver.ShareDriver):
                 )
                 rule_state_map[rule['access_id']] = {'state': 'error'}
                 continue
-            access_level = rule['access_level']
-            nfs_type = ('RW' if access_level == constants.ACCESS_LEVEL_RW
-                        else 'RO')
             try:
-                # Each IP rule gets its own client group + permission.
-                # Weka v5 NFS permissions use names (not UIDs).
-                cg_name = 'manila-{}-{}'.format(
-                    share['id'][:8], rule['access_id'][:8])
-                cg = self._client.create_client_group(cg_name)
-                cg_uid = cg['uid']
-                self._client.add_client_group_rule(
-                    cg_uid, 'IP', _cidr_to_weka_ip(rule['access_to']))
-                self._client.create_nfs_permission(
-                    client_group=cg_name,
-                    fs_uid=fs_name,
-                    path='/',
-                    access_type=nfs_type,
-                    squash=False,
-                )
-                LOG.debug(
-                    "Added NFS %s access for %s on share %s",
-                    nfs_type, rule['access_to'], share['id'],
-                )
+                self._apply_nfs_rule(share, fs_name, rule)
+                rule_state_map[rule['access_id']] = {'state': 'active'}
             except Exception as exc:
                 LOG.error(
                     "Failed to add NFS rule %s on share %s: %s",
@@ -662,6 +649,83 @@ class WekaShareDriver(driver.ShareDriver):
                 )
 
         return rule_state_map
+
+    def _apply_nfs_rule(self, share, fs_name, rule):
+        """Idempotently apply a single NFS 'ip' access rule.
+
+        Reuses (or creates) a per-rule client group, ensures the client
+        IP rule is present exactly once, and creates the NFS export
+        permission with the requested access level (recreating it if the
+        level changed).  Safe to call repeatedly: full-sync, recovery
+        resyncs and access-level updates all funnel through here without
+        leaking or duplicating cluster resources.
+        """
+        nfs_type = (
+            'RW' if rule['access_level'] == constants.ACCESS_LEVEL_RW
+            else 'RO')
+        cg_name = 'manila-{}-{}'.format(
+            share['id'][:8], rule['access_id'][:8])
+        weka_ip = _cidr_to_weka_ip(rule['access_to'])
+
+        # Get-or-create the client group so re-applying an existing rule
+        # neither hits a duplicate-name error nor leaks a new group.
+        cg = self._get_client_group_by_name(cg_name)
+        if cg is None:
+            cg = self._client.create_client_group(cg_name)
+            existing_ips = set()
+        else:
+            detail = self._client.get_client_group(cg['uid'])
+            existing_ips = {
+                r.get('ip')
+                for r in detail.get('rules', [])
+                if r.get('ip')
+            }
+        if weka_ip not in existing_ips:
+            self._client.add_client_group_rule(cg['uid'], 'IP', weka_ip)
+
+        # Ensure the export permission exists with the right access level.
+        perm = self._find_nfs_permission(fs_name, cg_name)
+        if perm is None:
+            self._client.create_nfs_permission(
+                client_group=cg_name, fs_uid=fs_name, path='/',
+                access_type=nfs_type, squash=False)
+        elif perm.get('permission_type') != nfs_type:
+            self._client.delete_nfs_permission(perm['uid'])
+            self._client.create_nfs_permission(
+                client_group=cg_name, fs_uid=fs_name, path='/',
+                access_type=nfs_type, squash=False)
+        LOG.debug(
+            "Applied NFS %s access for %s on share %s",
+            nfs_type, rule['access_to'], share['id'],
+        )
+
+    def _get_client_group_by_name(self, name):
+        """Return the NFS client group dict with this name, or None."""
+        for cg in self._client.list_client_groups() or []:
+            if cg.get('name') == name:
+                return cg
+        return None
+
+    def _find_nfs_permission(self, fs_name, cg_name):
+        """Return the NFS permission for (filesystem, group), or None."""
+        for perm in self._client.list_nfs_permissions() or []:
+            perm_fs = perm.get(
+                'filesystem', perm.get('filesystem_id', ''))
+            perm_cg = perm.get(
+                'group', perm.get('client_group_name', ''))
+            if perm_fs == fs_name and perm_cg == cg_name:
+                return perm
+        return None
+
+    def _delete_client_group_by_name(self, name):
+        """Delete the NFS client group with this name if it exists."""
+        cg = self._get_client_group_by_name(name)
+        if cg is None:
+            return
+        try:
+            self._client.delete_client_group(cg['uid'])
+        except weka_exc.WekaNotFound:
+            pass
 
     def _update_wekafs_access(self, share, add_rules, delete_rules):
         """Handle WekaFS access rules.
@@ -686,34 +750,55 @@ class WekaShareDriver(driver.ShareDriver):
         return rule_state_map
 
     def _remove_nfs_rule(self, fs_name, rule):
-        """Remove NFS permissions associated with an access rule.
+        """Remove the NFS permission AND client group for a rule.
+
+        Deletes both the export permission and the per-rule client group
+        so the cluster-wide client-group pool is not leaked across rule
+        add/delete cycles.
 
         :param fs_name: Weka filesystem name (used to match permissions).
         """
-        all_perms = self._client.list_nfs_permissions()
-        for perm in all_perms:
-            # Weka v5 uses 'filesystem' (name) in the response.
-            perm_fs = perm.get('filesystem', perm.get('filesystem_id', ''))
-            if perm_fs == fs_name:
-                # Match by client group name which encodes the rule ID.
-                cg_name = perm.get('group', perm.get('client_group_name', ''))
-                if rule['access_id'][:8] in cg_name:
-                    self._client.delete_nfs_permission(perm['uid'])
+        cg_names = set()
+        for perm in self._client.list_nfs_permissions() or []:
+            perm_fs = perm.get(
+                'filesystem', perm.get('filesystem_id', ''))
+            if perm_fs != fs_name:
+                continue
+            # Match by client group name which encodes the rule ID.
+            cg_name = perm.get(
+                'group', perm.get('client_group_name', ''))
+            if rule['access_id'][:8] in cg_name:
+                self._client.delete_nfs_permission(perm['uid'])
+                if cg_name:
+                    cg_names.add(cg_name)
+        for cg_name in cg_names:
+            self._delete_client_group_by_name(cg_name)
 
     def _remove_all_nfs_permissions(self, fs_name):
-        """Remove all NFS permissions for a filesystem (used during delete).
+        """Remove all NFS permissions AND client groups for a filesystem.
+
+        Used during share delete.  Deletes the per-rule client groups as
+        well as the export permissions to avoid leaking the cluster-wide
+        client-group pool.
 
         :param fs_name: Weka filesystem name (used to match permissions).
         """
-        perms = self._client.list_nfs_permissions()
-        for perm in perms:
-            # Weka v5 uses 'filesystem' (name) in the response.
-            perm_fs = perm.get('filesystem', perm.get('filesystem_id', ''))
-            if perm_fs == fs_name:
-                try:
-                    self._client.delete_nfs_permission(perm['uid'])
-                except weka_exc.WekaNotFound:
-                    pass
+        cg_names = set()
+        for perm in self._client.list_nfs_permissions() or []:
+            perm_fs = perm.get(
+                'filesystem', perm.get('filesystem_id', ''))
+            if perm_fs != fs_name:
+                continue
+            cg_name = perm.get(
+                'group', perm.get('client_group_name', ''))
+            try:
+                self._client.delete_nfs_permission(perm['uid'])
+            except weka_exc.WekaNotFound:
+                pass
+            if cg_name:
+                cg_names.add(cg_name)
+        for cg_name in cg_names:
+            self._delete_client_group_by_name(cg_name)
 
     # ------------------------------------------------------------------
     # Snapshots

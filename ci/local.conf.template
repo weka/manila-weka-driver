@@ -68,6 +68,9 @@ weka_organization = ${WEKA_ORGANIZATION}
 weka_filesystem_group = default
 weka_share_name_prefix = ci_nfs_
 weka_mount_point_base = /mnt/weka/nfs
+# NFS server the driver mounts from to copy snapshot data
+# (create_share_from_snapshot). Same host as the API in this CI.
+weka_nfs_server = ${WEKA_API_SERVER}
 
 # ── WEKAFS backend ───────────────────────────────────────
 [weka_wekafs]
