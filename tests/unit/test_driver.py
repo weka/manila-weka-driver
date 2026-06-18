@@ -1040,8 +1040,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
         self.assertEqual('active', result[rule['access_id']]['state'])
 
     def test_apply_nfs_rule_idempotent_existing_ip(self):
-        """Idempotent re-add: existing CG+IP → add_client_group_rule not
-        called."""
+        """Re-add skips add_client_group_rule when the IP already exists."""
         from manila.share.drivers.weka.driver import _cidr_to_weka_ip
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
@@ -1098,8 +1097,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
         self.assertEqual('RW', kwargs.get('access_type'))
 
     def test_update_rules_path_applied_not_ignored(self):
-        """update_rules path: rule reaches 'active', not treated as
-        full-sync."""
+        """update_rules path: rule reaches 'active', not full-sync."""
         drv = self._make_driver()
         drv._client.list_client_groups.return_value = []
         drv._client.list_nfs_permissions.return_value = []
@@ -1144,8 +1142,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
             'cg-uid-leak')
 
     def test_remove_all_nfs_permissions_leak_fix_deletes_client_groups(self):
-        """LEAK FIX on share delete: both permissions AND client groups
-        removed."""
+        """Share delete removes both permissions and client groups."""
         cg1_name = 'manila-share111-rule1111'
         cg2_name = 'manila-share222-rule2222'
         perm1 = fakes.fake_nfs_permission(
@@ -1169,8 +1166,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
         drv._client.delete_client_group.assert_any_call('cg-uid-2')
 
     def test_apply_nfs_rule_tolerates_existing_ip_rule(self):
-        """Idempotent re-apply: add_client_group_rule 400 'Rule already
-        exists' is tolerated; permission reconcile (ro->rw) still runs."""
+        """Tolerate 'Rule already exists' on re-add; ro->rw still runs."""
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
             access_type='ip', access_to='2.2.2.2', access_level='rw')
