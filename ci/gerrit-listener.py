@@ -24,6 +24,12 @@ GERRIT_USER = os.environ.get("GERRIT_USER", "Assaf")
 PROJECT = "openstack/manila"
 BRANCH = "master"
 
+# Initial trusted rollout: the Weka driver is out-of-tree, so the CI runs
+# only when a reviewer explicitly comments "run-weka-ci" on a patch. Set
+# AUTO_RUN = True to also auto-run on every patchset-created event and on
+# generic "recheck" comments once the CI is trusted.
+AUTO_RUN = False
+
 CI_DIR = "/opt/weka-ci"
 STATE_DIR = "/var/lib/weka-ci"
 LOCK_FILE = os.path.join(STATE_DIR, "runner.lock")
@@ -135,6 +141,9 @@ def parse_event(event):
         return None
 
     if etype == "patchset-created":
+        # Auto-run on new patchsets only once the CI is trusted.
+        if not AUTO_RUN:
+            return None
         ps = event.get("patchSet", {})
         return (
             str(change["number"]),
@@ -145,8 +154,13 @@ def parse_event(event):
 
     if etype == "comment-added":
         comment = event.get("comment", "")
-        # "recheck" (re-runs all CIs) or "run-weka-ci" (Weka CI only).
-        if re.search(r"\b(?:recheck|run-weka-ci)\b", comment, re.IGNORECASE):
+        # "run-weka-ci" is the explicit Weka opt-in and always triggers.
+        # Generic "recheck" re-runs all CIs; honor it only in AUTO_RUN mode
+        # so the scoped rollout isn't pulled in by every unrelated recheck.
+        triggered = re.search(
+            r"\brun-weka-ci\b", comment, re.IGNORECASE) or (
+            AUTO_RUN and re.search(r"\brecheck\b", comment, re.IGNORECASE))
+        if triggered:
             ps = event.get("patchSet", {})
             return (
                 str(change["number"]),
@@ -224,6 +238,11 @@ def main():
 
     log.info("Weka Manila CI listener starting")
     log.info("Watching project: %s branch: %s", PROJECT, BRANCH)
+    log.info(
+        "Trigger mode: %s",
+        "AUTO_RUN (patchset-created + recheck + run-weka-ci)" if AUTO_RUN
+        else "comment-triggered only (run-weka-ci)",
+    )
 
     for event in stream_events():
         parsed = parse_event(event)
