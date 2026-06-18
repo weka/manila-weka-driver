@@ -55,6 +55,19 @@ log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*"; }
 log "=== CI run starting for change ${CHANGE_NUM},${PATCHSET_NUM} ==="
 log "Revision: ${REVISION}"
 
+# ── Helper: kill orphaned Manila daemons ─────────────────────────────────────
+# Repeated per-job systemctl restarts leave old daemon generations reparented
+# to init; they survive the restart and keep retrying do_setup with a stale
+# in-memory config, racing the live process. Kill any stray share/api/scheduler
+# daemons so each restart yields a single clean generation (systemctl restart
+# then brings the units back up).
+kill_orphan_manila() {
+    sudo pkill -9 -f \
+        '/opt/stack/data/venv/bin/[m]anila-(share|api|scheduler)' \
+        2>/dev/null || true
+    sleep 2
+}
+
 # ── Helper: restore clean master ─────────────────────────────────────────────
 
 restore_clean_master() {
@@ -66,6 +79,7 @@ restore_clean_master() {
     if ! grep -q "'WEKAFS'" "$CONSTANTS_FILE" 2>/dev/null; then
         sed -i "s/'MAPRFS')/'MAPRFS', 'WEKAFS')/" "$CONSTANTS_FILE" 2>/dev/null || true
     fi
+    kill_orphan_manila
     sudo systemctl restart devstack@m-shr devstack@m-api devstack@m-sch 2>&1 || return 1
 }
 
@@ -148,6 +162,7 @@ sudo rm -rf manila.egg-info 2>/dev/null || true
 
 log "Phase 3: Restarting Manila services"
 
+kill_orphan_manila
 sudo systemctl restart devstack@m-shr devstack@m-api devstack@m-sch 2>&1 \
     || fail "Failed to restart Manila services" 2
 
