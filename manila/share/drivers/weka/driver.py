@@ -307,9 +307,10 @@ class WekaShareDriver(driver.ShareDriver):
                                    share_server=None, parent_share=None):
         """Create a new share populated with data from a snapshot.
 
-        Creates a new Weka filesystem, then uses NFS mounts on the Manila host
-        to rsync the snapshot contents (via .snapshots/<accessPoint>/) into the
-        new filesystem.
+        Creates a new Weka filesystem, then copies the snapshot contents
+        using the share's own protocol: WEKAFS shares copy over the Weka
+        POSIX client (no NFS gateway required); NFS shares copy over NFS
+        so a node without the Weka client installed can still serve them.
 
         :param context: Request context.
         :param share: New share model dict.
@@ -341,6 +342,89 @@ class WekaShareDriver(driver.ShareDriver):
         fs = self._create_filesystem_idempotent(
             new_fs_name, group_name, size_bytes)
 
+        # The data copy uses the share's own protocol: WEKAFS shares copy
+        # over the Weka POSIX client (no NFS gateway required); NFS shares
+        # copy over NFS so the node need not have the Weka client installed.
+        if share_proto == _WEKAFS_PROTO:
+            self._copy_snapshot_wekafs(
+                src_fs_name, new_fs_name, snap, snap_name, share, snapshot)
+        else:
+            self._copy_snapshot_nfs(
+                src_fs_name, new_fs_name, snap, snap_name, share, snapshot)
+
+        export_locations = self._build_export_locations(
+            share, new_fs_name, fs['uid'], share_proto)
+        return export_locations
+
+    def _copy_snapshot_wekafs(self, src_fs_name, new_fs_name,
+                              snap, snap_name, share, snapshot):
+        """Copy snapshot data into new_fs_name over the WekaFS POSIX client.
+
+        Mounts both the source and destination filesystems using the Weka
+        kernel client (backends=None — joined client) and rsyncs the
+        snapshot directory (.snapshots/<accessPoint>/) to the new filesystem.
+        Mounts are always cleaned up in a finally block.
+        """
+        net = self.configuration.safe_get('weka_net_device')
+        src_mnt = '/tmp/manila_snap_src_{}'.format(share['id'][:8])
+        dst_mnt = '/tmp/manila_snap_dst_{}'.format(share['id'][:8])
+        # backends=None: Manila host is a joined Weka client; mount by bare
+        # fs name to reuse the existing cluster attachment.
+        src_mount = weka_posix.WekaMount(
+            backends=None, fs_name=src_fs_name, mount_point=src_mnt,
+            net=net)
+        dst_mount = weka_posix.WekaMount(
+            backends=None, fs_name=new_fs_name, mount_point=dst_mnt,
+            net=net)
+
+        try:
+            src_mount.mount()
+            dst_mount.mount()
+
+            snap_dir = os.path.join(
+                src_mnt, '.snapshots',
+                snap.get('accessPoint') or snap_name)
+
+            LOG.info("Rsyncing snapshot data from %s to %s",
+                     snap_dir, dst_mnt)
+            processutils.execute(
+                'rsync', '-a',
+                snap_dir.rstrip('/') + '/',
+                dst_mnt.rstrip('/') + '/',
+                run_as_root=True, root_helper='sudo',
+            )
+            LOG.info(
+                "Copied snapshot %s content to new filesystem %s via "
+                "WekaFS", snap_name, new_fs_name,
+            )
+        except Exception as exc:
+            LOG.error(
+                "Failed to populate share %s from snapshot %s: %s",
+                share['id'], snapshot['id'], exc,
+            )
+            raise
+        finally:
+            for mount_obj in (dst_mount, src_mount):
+                try:
+                    mount_obj.unmount()
+                except Exception as e:
+                    LOG.warning("Failed to unmount %s: %s",
+                                mount_obj.mount_point, e)
+            for mnt in (src_mnt, dst_mnt):
+                try:
+                    os.rmdir(mnt)
+                except Exception:
+                    pass
+
+    def _copy_snapshot_nfs(self, src_fs_name, new_fs_name, snap,
+                           snap_name, share, snapshot):
+        """Copy snapshot data into new_fs_name over NFS.
+
+        Requires weka_nfs_server to be configured. Creates a temporary
+        client group and NFS permissions, mounts both filesystems locally
+        via NFS v3, rsyncs the snapshot directory, then removes all
+        temporary resources in a finally block.
+        """
         nfs_server = self.configuration.safe_get('weka_nfs_server')
         if not nfs_server:
             raise exception.ManilaException(
@@ -368,8 +452,10 @@ class WekaShareDriver(driver.ShareDriver):
         try:
             cg = self._client.create_client_group(tmp_cg_name)
             cg_uid = cg['uid']
-            rule = self._client.add_client_group_rule(cg_uid, 'IP', local_ip)
-            rule_uid = rule.get('uid') if isinstance(rule, dict) else None
+            rule = self._client.add_client_group_rule(
+                cg_uid, 'IP', local_ip)
+            rule_uid = (rule.get('uid')
+                        if isinstance(rule, dict) else None)
 
             self._client.create_nfs_permission(
                 client_group=tmp_cg_name,
@@ -408,8 +494,9 @@ class WekaShareDriver(driver.ShareDriver):
             )
             dst_mounted = True
 
-            snap_access_point = snap.get('accessPoint') or snap_name
-            snap_dir = os.path.join(src_mnt, '.snapshots', snap_access_point)
+            snap_dir = os.path.join(
+                src_mnt, '.snapshots',
+                snap.get('accessPoint') or snap_name)
 
             LOG.info("Rsyncing snapshot data from %s to %s",
                      snap_dir, dst_mnt)
@@ -458,23 +545,22 @@ class WekaShareDriver(driver.ShareDriver):
                         except Exception:
                             pass
             except Exception as e:
-                LOG.warning("Failed to clean up NFS permissions for %s: %s",
-                            tmp_cg_name, e)
+                LOG.warning(
+                    "Failed to clean up NFS permissions for %s: %s",
+                    tmp_cg_name, e)
             if cg_uid:
                 if rule_uid:
                     try:
-                        self._client.delete_client_group_rule(cg_uid, rule_uid)
+                        self._client.delete_client_group_rule(
+                            cg_uid, rule_uid)
                     except Exception:
                         pass
                 try:
                     self._client.delete_client_group(cg_uid)
                 except Exception as e:
-                    LOG.warning("Failed to delete client group %s: %s",
-                                tmp_cg_name, e)
-
-        export_locations = self._build_export_locations(
-            share, new_fs_name, fs['uid'], share_proto)
-        return export_locations
+                    LOG.warning(
+                        "Failed to delete client group %s: %s",
+                        tmp_cg_name, e)
 
     def delete_share(self, context, share, share_server=None):
         """Delete a share's underlying Weka filesystem.
@@ -837,8 +923,16 @@ class WekaShareDriver(driver.ShareDriver):
             "Creating snapshot %s (name='%s') for share %s",
             snapshot['id'], snap_name, share['id'],
         )
-        self._client.create_snapshot(
-            fs_uid, name=snap_name, is_writable=False)
+        try:
+            self._client.create_snapshot(
+                fs_uid, name=snap_name, is_writable=False)
+        except weka_exc.WekaApiError as exc:
+            if not _is_already_exists_error(exc):
+                raise
+            LOG.info(
+                "Snapshot %s already exists for share %s — treating as "
+                "created", snap_name, share['id'],
+            )
 
     def delete_snapshot(self, context, snapshot, share_server=None):
         """Delete a snapshot.
