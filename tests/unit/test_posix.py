@@ -175,6 +175,37 @@ class TestWekaMountMount(unittest.TestCase):
                     m.mount()
         makedirs.assert_called_once_with(_MOUNT_POINT, exist_ok=True)
 
+    def test_bare_fs_mount_when_backends_none(self):
+        # A joined (stateful) client: backends=None -> source is bare fs name.
+        execute = mock.Mock(return_value=('', ''))
+        m = _make_mount(execute=execute, backends=None)
+
+        with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
+                               return_value=False):
+            with mock.patch('os.path.isdir', return_value=True):
+                m.mount()
+
+        args = execute.call_args[0]
+        self.assertIn(_FS_NAME, args)
+        # Bare fs name: must NOT contain a '/' separator with a backends addr.
+        source = args[args.index(_FS_NAME)]
+        self.assertEqual(_FS_NAME, source)
+
+    def test_bare_fs_mount_when_backends_empty_string(self):
+        # Same behaviour when backends is an empty string.
+        execute = mock.Mock(return_value=('', ''))
+        m = _make_mount(execute=execute, backends='')
+
+        with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
+                               return_value=False):
+            with mock.patch('os.path.isdir', return_value=True):
+                m.mount()
+
+        args = execute.call_args[0]
+        self.assertIn(_FS_NAME, args)
+        source = args[args.index(_FS_NAME)]
+        self.assertEqual(_FS_NAME, source)
+
 
 class TestWekaMountUnmount(unittest.TestCase):
 

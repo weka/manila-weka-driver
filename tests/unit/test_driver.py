@@ -188,26 +188,29 @@ _PATCH_MAKEDIRS = 'manila.share.drivers.weka.driver.os.makedirs'
 _PATCH_RMDIR = 'manila.share.drivers.weka.driver.os.rmdir'
 _PATCH_SOCKET = 'manila.share.drivers.weka.driver.socket.socket'
 _PATCH_SLEEP = 'manila.share.drivers.weka.driver.time.sleep'
+_PATCH_WEKA_MOUNT = (
+    'manila.share.drivers.weka.driver.weka_posix.WekaMount')
 
 
 class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
     """Unit tests for WekaShareDriver.create_share_from_snapshot.
 
-    The method creates a new filesystem then NFS-mounts both the source and
-    destination filesystems on the Manila host, rsyncs the snapshot contents,
-    and always cleans up NFS permissions, the client group, and temp mounts
-    in a finally block regardless of whether the operation succeeded or failed.
+    create_share_from_snapshot dispatches on the share protocol:
+      - WEKAFS shares copy via _copy_snapshot_wekafs (WekaMount / POSIX).
+      - NFS shares copy via _copy_snapshot_nfs (NFS mounts, temp CG).
 
     Test coverage:
-      - Pre-condition failures (snapshot not found, no NFS server)
-      - Full happy path for WEKAFS and NFS protocols
-      - Each mount/rsync failure scenario — verifying correct cleanup state
-      - Cleanup resilience (umount failure doesn't mask original exception;
-        permission delete failure doesn't prevent a successful return)
+      - Pre-condition failure: snapshot not found
+      - WEKAFS happy path: WekaMount used, no NFS CG/perms created
+      - WEKAFS failure paths: mount errors, rsync error, cleanup resilience
+      - WEKAFS: weka_nfs_server=None does not prevent a successful copy
+      - NFS happy path: temp CG + perms created, NFS mounts + rsync, cleanup
+      - NFS: weka_nfs_server missing raises ManilaException
+      - NFS failure paths: src/dst mount, rsync errors; cleanup verified
+      - NFS: cleanup resilience (perm delete failure on success path)
     """
 
     NFS_SERVER = 'nfs.example.com'
-    # tmp_cg_name = 'manila-snap-' + FAKE_NEW_SHARE_ID[:8]
     TMP_CG_NAME = 'manila-snap-' + fakes.FAKE_NEW_SHARE_ID[:8]
 
     def _make_driver(self, nfs_server=NFS_SERVER):
@@ -220,21 +223,25 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
     def _setup_happy_path_client(self, drv):
         """Configure client mocks for a fully successful operation."""
         snap = fakes.fake_snapshot()          # filesystemUid == FAKE_FS_UID
-        src_fs = fakes.fake_filesystem()      # looked up by snap['filesystemUid']
+        src_fs = fakes.fake_filesystem()      # resolved by snap filesystemUid
         new_fs = fakes.fake_new_filesystem()  # created for the new share
+
+        drv._client.get_snapshot_by_name.return_value = snap
+        drv._client.get_filesystem.return_value = src_fs
+        drv._client.get_filesystem_by_name.return_value = None
+        drv._client.create_filesystem.return_value = new_fs
+        return snap, new_fs
+
+    def _setup_nfs_happy_path_client(self, drv):
+        """Client mocks for the NFS copy path (temp CG + perms)."""
+        snap, new_fs = self._setup_happy_path_client(drv)
         cg = fakes.fake_client_group()
-        # Perms have the tmp CG name so the cleanup loop deletes them
         perm_src = fakes.fake_nfs_permission(
             uid='perm-src', fs_name=fakes.FAKE_FS_NAME,
             cg_name=self.TMP_CG_NAME)
         perm_dst = fakes.fake_nfs_permission(
             uid='perm-dst', fs_name=fakes.FAKE_NEW_FS_NAME,
             cg_name=self.TMP_CG_NAME)
-
-        drv._client.get_snapshot_by_name.return_value = snap
-        drv._client.get_filesystem.return_value = src_fs
-        drv._client.get_filesystem_by_name.return_value = None
-        drv._client.create_filesystem.return_value = new_fs
         drv._client.create_client_group.return_value = cg
         drv._client.add_client_group_rule.return_value = {
             'uid': fakes.FAKE_CG_RULE_UID}
@@ -256,36 +263,176 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
             None, self._new_share(), fakes.fake_snapshot_model())
         drv._client.create_filesystem.assert_not_called()
 
-    def test_no_nfs_server_raises(self):
-        """ManilaException when weka_nfs_server is not configured."""
+    # ── WEKAFS happy path ─────────────────────────────────────────────────
+
+    @mock.patch(_PATCH_RMDIR)
+    @mock.patch(_PATCH_EXECUTE)
+    @mock.patch(_PATCH_WEKA_MOUNT)
+    def test_happy_path_wekafs(
+            self, mock_mount_cls, mock_exec, mock_rmdir):
+        """WEKAFS path: WekaMount used; no NFS CG or permissions created."""
+        drv = self._make_driver()
+        self._setup_happy_path_client(drv)
+        src_inst = mock.Mock()
+        src_inst.mount_point = '/tmp/manila_snap_src_new-shar'
+        dst_inst = mock.Mock()
+        dst_inst.mount_point = '/tmp/manila_snap_dst_new-shar'
+        mock_mount_cls.side_effect = [src_inst, dst_inst]
+
+        result = drv.create_share_from_snapshot(
+            None, self._new_share(), fakes.fake_snapshot_model())
+
+        drv._client.create_filesystem.assert_called_once()
+        drv._client.create_client_group.assert_not_called()
+        drv._client.create_nfs_permission.assert_not_called()
+        src_inst.mount.assert_called_once()
+        dst_inst.mount.assert_called_once()
+        exec_args = mock_exec.call_args[0]
+        self.assertEqual('rsync', exec_args[0])
+        self.assertIn('.snapshots', exec_args[2])
+        src_inst.unmount.assert_called_once()
+        dst_inst.unmount.assert_called_once()
+        self.assertEqual(1, len(result))
+
+    @mock.patch(_PATCH_RMDIR)
+    @mock.patch(_PATCH_EXECUTE)
+    @mock.patch(_PATCH_WEKA_MOUNT)
+    def test_wekafs_no_nfs_server_required(
+            self, mock_mount_cls, mock_exec, mock_rmdir):
+        """WEKAFS path: weka_nfs_server=None must not prevent a successful copy."""
         drv = self._make_driver(nfs_server=None)
-        drv._client.get_snapshot_by_name.return_value = fakes.fake_snapshot()
-        drv._client.get_filesystem.return_value = fakes.fake_filesystem()
-        drv._client.get_filesystem_by_name.return_value = None
-        drv._client.create_filesystem.return_value = fakes.fake_filesystem()
+        self._setup_happy_path_client(drv)
+        src_inst = mock.Mock()
+        src_inst.mount_point = '/tmp/manila_snap_src_new-shar'
+        dst_inst = mock.Mock()
+        dst_inst.mount_point = '/tmp/manila_snap_dst_new-shar'
+        mock_mount_cls.side_effect = [src_inst, dst_inst]
+
+        result = drv.create_share_from_snapshot(
+            None, self._new_share(), fakes.fake_snapshot_model())
+
+        self.assertEqual(1, len(result))
+        drv._client.create_client_group.assert_not_called()
+
+    # ── WEKAFS failure paths ──────────────────────────────────────────────
+
+    @mock.patch(_PATCH_RMDIR)
+    @mock.patch(_PATCH_EXECUTE)
+    @mock.patch(_PATCH_WEKA_MOUNT)
+    def test_wekafs_src_mount_fails_reraises_and_cleans_up(
+            self, mock_mount_cls, mock_exec, mock_rmdir):
+        """WEKAFS src mount failure: exception re-raised, both unmounts run."""
+        drv = self._make_driver()
+        self._setup_happy_path_client(drv)
+        src_inst = mock.Mock()
+        src_inst.mount_point = '/tmp/manila_snap_src_new-shar'
+        src_inst.mount.side_effect = processutils.ProcessExecutionError(
+            'mount src failed')
+        dst_inst = mock.Mock()
+        dst_inst.mount_point = '/tmp/manila_snap_dst_new-shar'
+        mock_mount_cls.side_effect = [src_inst, dst_inst]
 
         self.assertRaises(
-            exception.ManilaException,
+            processutils.ProcessExecutionError,
             drv.create_share_from_snapshot,
             None, self._new_share(), fakes.fake_snapshot_model())
 
-    # ── Happy path ───────────────────────────────────────────────────────
+        mock_exec.assert_not_called()
+        src_inst.unmount.assert_called_once()
+        dst_inst.unmount.assert_called_once()
+
+    @mock.patch(_PATCH_RMDIR)
+    @mock.patch(_PATCH_EXECUTE)
+    @mock.patch(_PATCH_WEKA_MOUNT)
+    def test_wekafs_dst_mount_fails_reraises_and_cleans_up(
+            self, mock_mount_cls, mock_exec, mock_rmdir):
+        """WEKAFS dst mount failure: exception re-raised, both unmounts run."""
+        drv = self._make_driver()
+        self._setup_happy_path_client(drv)
+        src_inst = mock.Mock()
+        src_inst.mount_point = '/tmp/manila_snap_src_new-shar'
+        dst_inst = mock.Mock()
+        dst_inst.mount_point = '/tmp/manila_snap_dst_new-shar'
+        dst_inst.mount.side_effect = processutils.ProcessExecutionError(
+            'mount dst failed')
+        mock_mount_cls.side_effect = [src_inst, dst_inst]
+
+        self.assertRaises(
+            processutils.ProcessExecutionError,
+            drv.create_share_from_snapshot,
+            None, self._new_share(), fakes.fake_snapshot_model())
+
+        mock_exec.assert_not_called()
+        src_inst.unmount.assert_called_once()
+        dst_inst.unmount.assert_called_once()
+
+    @mock.patch(_PATCH_RMDIR)
+    @mock.patch(_PATCH_EXECUTE)
+    @mock.patch(_PATCH_WEKA_MOUNT)
+    def test_wekafs_rsync_fails_reraises_and_cleans_up(
+            self, mock_mount_cls, mock_exec, mock_rmdir):
+        """WEKAFS rsync failure: exception re-raised, both mounts unmounted."""
+        drv = self._make_driver()
+        self._setup_happy_path_client(drv)
+        src_inst = mock.Mock()
+        src_inst.mount_point = '/tmp/manila_snap_src_new-shar'
+        dst_inst = mock.Mock()
+        dst_inst.mount_point = '/tmp/manila_snap_dst_new-shar'
+        mock_mount_cls.side_effect = [src_inst, dst_inst]
+        mock_exec.side_effect = processutils.ProcessExecutionError(
+            'rsync failed')
+
+        self.assertRaises(
+            processutils.ProcessExecutionError,
+            drv.create_share_from_snapshot,
+            None, self._new_share(), fakes.fake_snapshot_model())
+
+        mock_exec.assert_called_once()
+        src_inst.unmount.assert_called_once()
+        dst_inst.unmount.assert_called_once()
+
+    @mock.patch(_PATCH_RMDIR)
+    @mock.patch(_PATCH_EXECUTE)
+    @mock.patch(_PATCH_WEKA_MOUNT)
+    def test_wekafs_unmount_failure_does_not_mask_rsync_exception(
+            self, mock_mount_cls, mock_exec, mock_rmdir):
+        """WEKAFS: unmount error in finally must not hide the rsync error."""
+        drv = self._make_driver()
+        self._setup_happy_path_client(drv)
+        rsync_err = processutils.ProcessExecutionError('rsync failed')
+        unmount_err = Exception('unmount failed')
+        src_inst = mock.Mock()
+        src_inst.mount_point = '/tmp/manila_snap_src_new-shar'
+        src_inst.unmount.side_effect = unmount_err
+        dst_inst = mock.Mock()
+        dst_inst.mount_point = '/tmp/manila_snap_dst_new-shar'
+        dst_inst.unmount.side_effect = unmount_err
+        mock_mount_cls.side_effect = [src_inst, dst_inst]
+        mock_exec.side_effect = rsync_err
+
+        with self.assertRaises(processutils.ProcessExecutionError) as cm:
+            drv.create_share_from_snapshot(
+                None, self._new_share(), fakes.fake_snapshot_model())
+
+        self.assertIs(rsync_err, cm.exception)
+
+    # ── NFS happy path ────────────────────────────────────────────────────
 
     @mock.patch(_PATCH_SLEEP)
     @mock.patch(_PATCH_SOCKET)
     @mock.patch(_PATCH_RMDIR)
     @mock.patch(_PATCH_MAKEDIRS)
     @mock.patch(_PATCH_EXECUTE)
-    def test_happy_path_wekafs(
+    def test_happy_path_nfs_protocol(
             self, mock_exec, mock_makedirs, mock_rmdir,
             mock_socket, mock_sleep):
-        """Full happy path: filesystem created, data copied, cleanup run."""
+        """NFS path: temp CG + perms created, NFS mounts + rsync run."""
         drv = self._make_driver()
-        self._setup_happy_path_client(drv)
+        self._setup_nfs_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('10.0.0.1', 0)
 
         result = drv.create_share_from_snapshot(
-            None, self._new_share(), fakes.fake_snapshot_model())
+            None, self._new_share(proto='NFS'), fakes.fake_snapshot_model())
 
         drv._client.create_filesystem.assert_called_once()
         drv._client.create_client_group.assert_called_once()
@@ -296,45 +443,39 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
         self.assertIn('rsync', exec_cmds)
         self.assertEqual(2, exec_cmds.count('umount'))
         drv._client.delete_nfs_permission.assert_called()
-        drv._client.delete_client_group.assert_called_once_with(fakes.FAKE_CG_UID)
-        self.assertEqual(1, len(result))
-
-    @mock.patch(_PATCH_SLEEP)
-    @mock.patch(_PATCH_SOCKET)
-    @mock.patch(_PATCH_RMDIR)
-    @mock.patch(_PATCH_MAKEDIRS)
-    @mock.patch(_PATCH_EXECUTE)
-    def test_happy_path_nfs_protocol(
-            self, mock_exec, mock_makedirs, mock_rmdir,
-            mock_socket, mock_sleep):
-        """NFS-protocol shares use the same data copy path."""
-        drv = self._make_driver()
-        self._setup_happy_path_client(drv)
-        mock_socket.return_value.getsockname.return_value = ('10.0.0.1', 0)
-
-        result = drv.create_share_from_snapshot(
-            None, self._new_share(proto='NFS'), fakes.fake_snapshot_model())
-
+        drv._client.delete_client_group.assert_called_once_with(
+            fakes.FAKE_CG_UID)
         self.assertEqual(1, len(result))
         self.assertIn(':/', result[0]['path'])
 
-    # ── Failure paths — verify cleanup runs ──────────────────────────────
+    # ── NFS pre-condition failure ─────────────────────────────────────────
+
+    def test_no_nfs_server_raises(self):
+        """NFS path: ManilaException when weka_nfs_server is not configured."""
+        drv = self._make_driver(nfs_server=None)
+        drv._client.get_snapshot_by_name.return_value = fakes.fake_snapshot()
+        drv._client.get_filesystem.return_value = fakes.fake_filesystem()
+        drv._client.get_filesystem_by_name.return_value = None
+        drv._client.create_filesystem.return_value = fakes.fake_filesystem()
+
+        self.assertRaises(
+            exception.ManilaException,
+            drv.create_share_from_snapshot,
+            None, self._new_share(proto='NFS'), fakes.fake_snapshot_model())
+
+    # ── NFS failure paths ─────────────────────────────────────────────────
 
     @mock.patch(_PATCH_SLEEP)
     @mock.patch(_PATCH_SOCKET)
     @mock.patch(_PATCH_RMDIR)
     @mock.patch(_PATCH_MAKEDIRS)
     @mock.patch(_PATCH_EXECUTE)
-    def test_src_mount_fails_reraises_and_cleans_up(
+    def test_nfs_src_mount_fails_reraises_and_cleans_up(
             self, mock_exec, mock_makedirs, mock_rmdir,
             mock_socket, mock_sleep):
-        """Src mount failure: exception re-raised.
-
-        No umounts (nothing was mounted); NFS permissions and client
-        group still deleted.
-        """
+        """NFS src mount failure: exception re-raised; no umounts; CG deleted."""
         drv = self._make_driver()
-        self._setup_happy_path_client(drv)
+        self._setup_nfs_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('10.0.0.1', 0)
         mock_exec.side_effect = processutils.ProcessExecutionError(
             'mount src failed')
@@ -342,7 +483,7 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
         self.assertRaises(
             processutils.ProcessExecutionError,
             drv.create_share_from_snapshot,
-            None, self._new_share(), fakes.fake_snapshot_model())
+            None, self._new_share(proto='NFS'), fakes.fake_snapshot_model())
 
         exec_cmds = [c[0][0] for c in mock_exec.call_args_list]
         self.assertNotIn('umount', exec_cmds)
@@ -354,14 +495,13 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
     @mock.patch(_PATCH_RMDIR)
     @mock.patch(_PATCH_MAKEDIRS)
     @mock.patch(_PATCH_EXECUTE)
-    def test_dst_mount_fails_reraises_and_cleans_up(
+    def test_nfs_dst_mount_fails_reraises_and_cleans_up(
             self, mock_exec, mock_makedirs, mock_rmdir,
             mock_socket, mock_sleep):
-        """Dst mount failure: src is unmounted, perms and CG deleted."""
+        """NFS dst mount failure: src unmounted, perms and CG deleted."""
         drv = self._make_driver()
-        self._setup_happy_path_client(drv)
+        self._setup_nfs_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('10.0.0.1', 0)
-        # src mount succeeds, dst mount fails
         mock_exec.side_effect = [
             None,
             processutils.ProcessExecutionError('mount dst failed'),
@@ -370,10 +510,10 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
         self.assertRaises(
             processutils.ProcessExecutionError,
             drv.create_share_from_snapshot,
-            None, self._new_share(), fakes.fake_snapshot_model())
+            None, self._new_share(proto='NFS'), fakes.fake_snapshot_model())
 
         exec_cmds = [c[0][0] for c in mock_exec.call_args_list]
-        self.assertEqual(1, exec_cmds.count('umount'))  # only src unmounted
+        self.assertEqual(1, exec_cmds.count('umount'))
         drv._client.delete_nfs_permission.assert_called()
         drv._client.delete_client_group.assert_called_once()
 
@@ -382,14 +522,13 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
     @mock.patch(_PATCH_RMDIR)
     @mock.patch(_PATCH_MAKEDIRS)
     @mock.patch(_PATCH_EXECUTE)
-    def test_rsync_fails_reraises_and_cleans_up(
+    def test_nfs_rsync_fails_reraises_and_cleans_up(
             self, mock_exec, mock_makedirs, mock_rmdir,
             mock_socket, mock_sleep):
-        """Rsync failure: both mounts unmounted, perms and CG deleted."""
+        """NFS rsync failure: both mounts unmounted; perms and CG deleted."""
         drv = self._make_driver()
-        self._setup_happy_path_client(drv)
+        self._setup_nfs_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('10.0.0.1', 0)
-        # src mount OK, dst mount OK, rsync fails
         mock_exec.side_effect = [
             None, None,
             processutils.ProcessExecutionError('rsync failed'),
@@ -398,37 +537,36 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
         self.assertRaises(
             processutils.ProcessExecutionError,
             drv.create_share_from_snapshot,
-            None, self._new_share(), fakes.fake_snapshot_model())
+            None, self._new_share(proto='NFS'), fakes.fake_snapshot_model())
 
         exec_cmds = [c[0][0] for c in mock_exec.call_args_list]
         self.assertEqual(2, exec_cmds.count('umount'))
         drv._client.delete_nfs_permission.assert_called()
         drv._client.delete_client_group.assert_called_once()
 
-    # ── Cleanup resilience ───────────────────────────────────────────────
+    # ── NFS cleanup resilience ────────────────────────────────────────────
 
     @mock.patch(_PATCH_SLEEP)
     @mock.patch(_PATCH_SOCKET)
     @mock.patch(_PATCH_RMDIR)
     @mock.patch(_PATCH_MAKEDIRS)
     @mock.patch(_PATCH_EXECUTE)
-    def test_umount_failure_does_not_mask_rsync_exception(
+    def test_nfs_umount_failure_does_not_mask_rsync_exception(
             self, mock_exec, mock_makedirs, mock_rmdir,
             mock_socket, mock_sleep):
-        """A umount error in the finally block must not hide the original.
-
-        The rsync error is what the caller should see.
-        """
+        """NFS: umount error in finally must not hide the rsync exception."""
         drv = self._make_driver()
-        self._setup_happy_path_client(drv)
+        self._setup_nfs_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('10.0.0.1', 0)
         rsync_err = processutils.ProcessExecutionError('rsync failed')
         umount_err = processutils.ProcessExecutionError('umount failed')
-        mock_exec.side_effect = [None, None, rsync_err, umount_err, umount_err]
+        mock_exec.side_effect = [
+            None, None, rsync_err, umount_err, umount_err]
 
         with self.assertRaises(processutils.ProcessExecutionError) as cm:
             drv.create_share_from_snapshot(
-                None, self._new_share(), fakes.fake_snapshot_model())
+                None, self._new_share(proto='NFS'),
+                fakes.fake_snapshot_model())
 
         self.assertIs(rsync_err, cm.exception)
 
@@ -437,22 +575,18 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
     @mock.patch(_PATCH_RMDIR)
     @mock.patch(_PATCH_MAKEDIRS)
     @mock.patch(_PATCH_EXECUTE)
-    def test_permission_delete_failure_does_not_raise_on_success(
+    def test_nfs_permission_delete_failure_does_not_raise_on_success(
             self, mock_exec, mock_makedirs, mock_rmdir,
             mock_socket, mock_sleep):
-        """A permission cleanup failure must not propagate.
-
-        When the copy itself succeeded, export locations are still
-        returned.
-        """
+        """NFS: perm cleanup failure must not propagate; locations returned."""
         drv = self._make_driver()
-        self._setup_happy_path_client(drv)
+        self._setup_nfs_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('10.0.0.1', 0)
         drv._client.delete_nfs_permission.side_effect = Exception(
             'API error during cleanup')
 
         result = drv.create_share_from_snapshot(
-            None, self._new_share(), fakes.fake_snapshot_model())
+            None, self._new_share(proto='NFS'), fakes.fake_snapshot_model())
 
         self.assertEqual(1, len(result))
 
@@ -614,6 +748,39 @@ class TestWekaShareDriverSnapshots(unittest.TestCase):
         # Should not raise
         drv.delete_snapshot(context=None, snapshot=snap_model)
         drv._client.delete_snapshot.assert_not_called()
+
+    def test_create_snapshot_idempotent_when_already_exists(self):
+        """create_snapshot must not raise if the snapshot already exists.
+
+        Weka returns a 400 "name already exists" error on duplicate snapshot
+        names. Treat already-exists as success so duplicate RPC delivery and
+        retries do not surface an error.
+        """
+        drv = self._make_driver()
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        drv._client.create_snapshot.side_effect = (
+            weka_exc.WekaApiError(
+                status_code=400,
+                reason='/snapshots: name already exists'))
+        snap_model = fakes.fake_snapshot_model()
+
+        # Should not raise
+        drv.create_snapshot(context=None, snapshot=snap_model)
+
+    def test_create_snapshot_propagates_non_exists_error(self):
+        """create_snapshot must re-raise WekaApiError that is not already-exists."""
+        drv = self._make_driver()
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        drv._client.create_snapshot.side_effect = (
+            weka_exc.WekaApiError(
+                status_code=500, reason='internal server error'))
+        snap_model = fakes.fake_snapshot_model()
+
+        self.assertRaises(
+            weka_exc.WekaApiError,
+            drv.create_snapshot, None, snap_model)
 
     def test_revert_to_snapshot(self):
         drv = self._make_driver()

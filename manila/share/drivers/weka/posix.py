@@ -151,10 +151,14 @@ class WekaMount(object):
 
             self._ensure_mount_point_dir(self.mount_point)
 
-            source = '{backends}/{fs_name}'.format(
-                backends=self.backends,
-                fs_name=self.fs_name,
-            )
+            # A joined (stateful) Weka client mounts by bare filesystem
+            # name and reuses its existing cluster attachment; only a
+            # stateless client needs the explicit backends prefix.
+            if self.backends:
+                source = '{backends}/{fs_name}'.format(
+                    backends=self.backends, fs_name=self.fs_name)
+            else:
+                source = self.fs_name
             mount_options = self._build_mount_options()
 
             cmd = ['mount', '-t', 'wekafs']
