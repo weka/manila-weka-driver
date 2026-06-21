@@ -125,7 +125,8 @@ WEKA_REPO="/opt/stack/manila-weka-driver"
 if [ -d "${WEKA_REPO}/ci" ]; then
     log "Refreshing CI scripts from ${WEKA_REPO}/ci"
     for f in ci-runner.sh post-results.sh collect-logs.sh \
-             gerrit-listener.py tempest-include.txt local.conf.template; do
+             gerrit-listener.py tempest-include.txt \
+             local.conf.template; do
         [ -f "${WEKA_REPO}/ci/${f}" ] && cp "${WEKA_REPO}/ci/${f}" "${CI_DIR}/"
     done
     chmod +x "${CI_DIR}"/*.sh "${CI_DIR}"/*.py 2>/dev/null || true
@@ -145,10 +146,10 @@ openstack share type create weka-nfs false \
     revert_to_snapshot_support=true \
     2>&1 || log "WARNING: Failed to create weka-nfs share type (may already exist)"
 
-# NOTE: do NOT set a share_proto extra-spec — CapabilitiesFilter matches it
-# against the driver's storage_protocol ('WEKAFS NFS'), so 'WEKAFS' fails the
-# filter (NoValidHost) and no wekafs share can be scheduled. Protocol is
-# chosen per-share at create time; the backend pin is share_backend_name.
+# NOTE: do NOT set a share_proto extra-spec — CapabilitiesFilter would match
+# it against the driver's storage_protocol ("WEKAFS_NFS"), so 'WEKAFS' alone
+# fails the filter (NoValidHost). Protocol is chosen per-share at create time;
+# the backend is pinned via share_backend_name.
 openstack share type create weka-wekafs false \
     --extra-specs share_backend_name=weka_wekafs \
     snapshot_support=true \
@@ -190,12 +191,45 @@ if [ -f "$TEMPEST_CONF" ]; then
     iniset "$TEMPEST_CONF" share run_migration_tests false
     iniset "$TEMPEST_CONF" share run_ipv6_tests false
     iniset "$TEMPEST_CONF" share capability_snapshot_support true
+    # Must equal the driver's reported storage_protocol ("WEKAFS_NFS") so
+    # share-type tests that key on storage_protocol (CapabilitiesFilter
+    # exact-match) and ShareMultiBackendTest (splits on "_") pass.
+    iniset "$TEMPEST_CONF" share capability_storage_protocol WEKAFS_NFS
+    # NFS gateway is reachable (host firewall opened in gateway bootstrap;
+    # ganesha is kernel-mode on 0.0.0.0:2049). Enable the snapshot-copy path.
     iniset "$TEMPEST_CONF" share capability_create_share_from_snapshot_support true
     iniset "$TEMPEST_CONF" share suppress_errors_in_cleanup true
     iniset "$TEMPEST_CONF" share build_timeout 600
     set -u
 else
     log "WARNING: tempest.conf missing; skipping tempest [share] config"
+fi
+
+# ── Point manila at the live Weka NFS gateway ─────────────────────────────────
+# The CI host is a Weka client, so discover the UP nfs-gateway container's IP.
+# ganesha listens on 0.0.0.0:2049 there; mountable once its host firewall is
+# open (opened by the gateway bootstrap). Set weka_nfs_server in both backends
+# so create_share_from_snapshot can reach the gateway, then restart manila-share.
+GW_IP=$(weka cluster container -J 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = []
+print(next((c["ips"][0] for c in d
+            if "nfs-gateway" in (c.get("hostname") or "")
+            and c.get("status") == "UP" and c.get("ips")), ""))
+' 2>/dev/null)
+if [ -n "$GW_IP" ]; then
+    log "Weka NFS gateway discovered at $GW_IP; setting weka_nfs_server"
+    set +u
+    source "${DEVSTACK_DIR}/functions"
+    iniset /etc/manila/manila.conf weka_nfs weka_nfs_server "$GW_IP"
+    iniset /etc/manila/manila.conf weka_wekafs weka_nfs_server "$GW_IP"
+    set -u
+    sudo systemctl restart devstack@m-shr 2>&1 || true
+else
+    log "WARNING: no UP Weka NFS gateway found; weka_nfs_server left as-is (create_share_from_snapshot will fail)"
 fi
 
 # Verify
