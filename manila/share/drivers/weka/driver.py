@@ -1007,7 +1007,14 @@ class WekaShareDriver(driver.ShareDriver):
             'share_backend_name': backend_name,
             'vendor_name': 'Weka',
             'driver_version': DRIVER_VERSION,
-            'storage_protocol': ' '.join(_SUPPORTED_PROTOCOLS),
+            # Report as an underscore-joined string (e.g. "WEKAFS_NFS") so
+            # the scheduler CapabilitiesFilter exact-matches the value against
+            # a share type's storage_protocol extra-spec (operators set
+            # capability_storage_protocol to the same value), and so
+            # manila-tempest-plugin's ShareMultiBackendTest (which calls
+            # storage_protocol.lower().split('_')) works — a Python list
+            # would raise AttributeError on .lower().
+            'storage_protocol': '_'.join(_SUPPORTED_PROTOCOLS),
             'total_capacity_gb': weka_utils.bytes_to_gb(total_bytes),
             'free_capacity_gb': weka_utils.bytes_to_gb(free_bytes),
             'reserved_percentage': 0,
