@@ -770,9 +770,48 @@ class TestWekaShareDriverStats(unittest.TestCase):
         )
         drv._client.get_capacity.return_value = cap
 
+        captured = {}
+
+        def _capture(stats):
+            captured.update(stats)
+
         with mock.patch.object(
-                weka_driver.driver.ShareDriver, '_update_share_stats'):
+                weka_driver.driver.ShareDriver, '_update_share_stats',
+                side_effect=_capture):
             drv._update_share_stats()
+
+        self.assertEqual('WEKAFS_NFS', captured['storage_protocol'])
+        self.assertIsInstance(captured['storage_protocol'], str)
+        self.assertAlmostEqual(100.0, captured['total_capacity_gb'], places=0)
+        self.assertAlmostEqual(70.0, captured['free_capacity_gb'], places=0)
+
+    def test_update_share_stats_storage_protocol_is_underscore_joined(self):
+        """storage_protocol must be an underscore-joined string.
+
+        Manila's scheduler CapabilitiesFilter exact-matches the reported
+        storage_protocol string against the share type's
+        capability_storage_protocol extra-spec (both must be "WEKAFS_NFS").
+        manila-tempest-plugin's ShareMultiBackendTest also calls
+        storage_protocol.lower().split('_'), which requires a string — a
+        Python list would raise AttributeError on .lower().
+        """
+        drv = self._make_driver()
+        drv._client.get_capacity.return_value = fakes.fake_capacity()
+
+        captured = {}
+
+        def _capture(stats):
+            captured.update(stats)
+
+        with mock.patch.object(
+                weka_driver.driver.ShareDriver, '_update_share_stats',
+                side_effect=_capture):
+            drv._update_share_stats()
+
+        proto = captured['storage_protocol']
+        self.assertIsInstance(proto, str,
+                              "storage_protocol must be a string, not a list")
+        self.assertEqual('WEKAFS_NFS', proto)
 
     def test_update_share_stats_handles_api_error(self):
         drv = self._make_driver()
