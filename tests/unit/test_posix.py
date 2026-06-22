@@ -27,14 +27,21 @@ _BACKENDS = '10.0.0.1,10.0.0.2'
 _FS_NAME = 'manila_test-fs'
 _MOUNT_POINT = '/mnt/weka/manila_test-fs'
 
+_PATCH_WEKAFS_MOUNT = (
+    'manila.share.drivers.weka.posix.weka_privsep.wekafs_mount')
+_PATCH_PRIVSEP_UMOUNT = (
+    'manila.share.drivers.weka.posix.weka_privsep.umount')
+
 
 def _make_mount(**kwargs):
     defaults = dict(
         backends=_BACKENDS,
         fs_name=_FS_NAME,
         mount_point=_MOUNT_POINT,
-        execute=mock.Mock(return_value=('', '')),
     )
+    # Drop legacy 'execute' kwarg so callers can still pass it without
+    # breaking; it is ignored now that privsep is used.
+    kwargs.pop('execute', None)
     defaults.update(kwargs)
     return weka_posix.WekaMount(**defaults)
 
@@ -127,161 +134,158 @@ class TestWekaMountIsMount(unittest.TestCase):
 class TestWekaMountMount(unittest.TestCase):
 
     def test_mount_calls_correct_command(self):
-        execute = mock.Mock(return_value=('', ''))
-        m = _make_mount(execute=execute, num_cores=2)
+        m = _make_mount(num_cores=2)
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=False):
             with mock.patch('os.path.isdir', return_value=True):
-                m.mount()
+                with mock.patch(_PATCH_WEKAFS_MOUNT) as mock_wm:
+                    m.mount()
 
-        execute.assert_called_once()
-        args = execute.call_args[0]
-        self.assertEqual('mount', args[0])
-        self.assertIn('-t', args)
-        self.assertIn('wekafs', args)
-        source = '{}/{}'.format(_BACKENDS, _FS_NAME)
-        self.assertIn(source, args)
-        self.assertIn(_MOUNT_POINT, args)
+        mock_wm.assert_called_once()
+        source_arg = mock_wm.call_args[0][0]
+        mount_point_arg = mock_wm.call_args[0][1]
+        expected_source = '{}/{}'.format(_BACKENDS, _FS_NAME)
+        self.assertEqual(expected_source, source_arg)
+        self.assertEqual(_MOUNT_POINT, mount_point_arg)
 
     def test_mount_idempotent_when_already_mounted(self):
-        execute = mock.Mock(return_value=('', ''))
-        m = _make_mount(execute=execute)
+        m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=True):
-            m.mount()
+            with mock.patch(_PATCH_WEKAFS_MOUNT) as mock_wm:
+                m.mount()
 
-        execute.assert_not_called()
+        mock_wm.assert_not_called()
 
     def test_mount_raises_on_process_error(self):
-        execute = mock.Mock(
-            side_effect=processutils.ProcessExecutionError('fail'))
-        m = _make_mount(execute=execute)
+        m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=False):
             with mock.patch('os.path.isdir', return_value=True):
-                self.assertRaises(weka_exc.WekaMountError, m.mount)
+                with mock.patch(
+                        _PATCH_WEKAFS_MOUNT,
+                        side_effect=processutils.ProcessExecutionError(
+                            'fail')):
+                    self.assertRaises(weka_exc.WekaMountError, m.mount)
 
     def test_mount_creates_mount_point_dir(self):
-        execute = mock.Mock(return_value=('', ''))
-        m = _make_mount(execute=execute)
+        m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=False):
             with mock.patch('os.path.isdir', return_value=False):
                 with mock.patch('os.makedirs') as makedirs:
-                    m.mount()
+                    with mock.patch(_PATCH_WEKAFS_MOUNT):
+                        m.mount()
         makedirs.assert_called_once_with(_MOUNT_POINT, exist_ok=True)
 
     def test_bare_fs_mount_when_backends_none(self):
         # A joined (stateful) client: backends=None -> source is bare fs name.
-        execute = mock.Mock(return_value=('', ''))
-        m = _make_mount(execute=execute, backends=None)
+        m = _make_mount(backends=None)
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=False):
             with mock.patch('os.path.isdir', return_value=True):
-                m.mount()
+                with mock.patch(_PATCH_WEKAFS_MOUNT) as mock_wm:
+                    m.mount()
 
-        args = execute.call_args[0]
-        self.assertIn(_FS_NAME, args)
-        # Bare fs name: must NOT contain a '/' separator with a backends addr.
-        source = args[args.index(_FS_NAME)]
-        self.assertEqual(_FS_NAME, source)
+        source_arg = mock_wm.call_args[0][0]
+        # Bare fs name: must NOT contain a '/' with a backends prefix.
+        self.assertEqual(_FS_NAME, source_arg)
 
     def test_bare_fs_mount_when_backends_empty_string(self):
         # Same behaviour when backends is an empty string.
-        execute = mock.Mock(return_value=('', ''))
-        m = _make_mount(execute=execute, backends='')
+        m = _make_mount(backends='')
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=False):
             with mock.patch('os.path.isdir', return_value=True):
-                m.mount()
+                with mock.patch(_PATCH_WEKAFS_MOUNT) as mock_wm:
+                    m.mount()
 
-        args = execute.call_args[0]
-        self.assertIn(_FS_NAME, args)
-        source = args[args.index(_FS_NAME)]
-        self.assertEqual(_FS_NAME, source)
+        source_arg = mock_wm.call_args[0][0]
+        self.assertEqual(_FS_NAME, source_arg)
 
 
 class TestWekaMountUnmount(unittest.TestCase):
 
     def test_unmount_calls_umount(self):
-        execute = mock.Mock(return_value=('', ''))
-        m = _make_mount(execute=execute)
+        m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=True):
-            m.unmount()
+            with mock.patch(_PATCH_PRIVSEP_UMOUNT) as mock_um:
+                m.unmount()
 
-        execute.assert_called_once()
-        args = execute.call_args[0]
-        self.assertEqual('umount', args[0])
-        self.assertIn(_MOUNT_POINT, args)
+        mock_um.assert_called_once_with(_MOUNT_POINT, lazy=False)
 
     def test_unmount_lazy_uses_l_flag(self):
-        execute = mock.Mock(return_value=('', ''))
-        m = _make_mount(execute=execute)
+        m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=True):
-            m.unmount(force=True)
+            with mock.patch(_PATCH_PRIVSEP_UMOUNT) as mock_um:
+                m.unmount(force=True)
 
-        args = execute.call_args[0]
-        self.assertIn('-l', args)
+        mock_um.assert_called_once_with(_MOUNT_POINT, lazy=True)
 
     def test_unmount_noop_when_not_mounted(self):
-        execute = mock.Mock(return_value=('', ''))
-        m = _make_mount(execute=execute)
+        m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=False):
-            m.unmount()
+            with mock.patch(_PATCH_PRIVSEP_UMOUNT) as mock_um:
+                m.unmount()
 
-        execute.assert_not_called()
+        mock_um.assert_not_called()
 
     def test_unmount_raises_on_process_error(self):
-        execute = mock.Mock(
-            side_effect=processutils.ProcessExecutionError('fail'))
-        m = _make_mount(execute=execute)
+        m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=True):
-            self.assertRaises(weka_exc.WekaUnmountError, m.unmount)
+            with mock.patch(
+                    _PATCH_PRIVSEP_UMOUNT,
+                    side_effect=processutils.ProcessExecutionError(
+                        'fail')):
+                self.assertRaises(weka_exc.WekaUnmountError, m.unmount)
 
 
 class TestWekaMountContextManager(unittest.TestCase):
 
     def test_context_manager_mounts_and_unmounts(self):
-        execute = mock.Mock(return_value=('', ''))
-        m = _make_mount(execute=execute)
+        m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                side_effect=[False, True]):
             with mock.patch('os.path.isdir', return_value=True):
-                with m:
-                    pass
+                with mock.patch(_PATCH_WEKAFS_MOUNT) as mock_wm:
+                    with mock.patch(_PATCH_PRIVSEP_UMOUNT) as mock_um:
+                        with m:
+                            pass
 
-        # mount() + unmount() each call execute once
-        self.assertEqual(2, execute.call_count)
+        mock_wm.assert_called_once()
+        mock_um.assert_called_once()
 
     def test_context_manager_unmounts_even_on_exception(self):
-        execute = mock.Mock(return_value=('', ''))
-        m = _make_mount(execute=execute)
+        m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                side_effect=[False, True]):
             with mock.patch('os.path.isdir', return_value=True):
-                try:
-                    with m:
-                        raise ValueError("test error")
-                except ValueError:
-                    pass
+                with mock.patch(_PATCH_WEKAFS_MOUNT) as mock_wm:
+                    with mock.patch(_PATCH_PRIVSEP_UMOUNT) as mock_um:
+                        try:
+                            with m:
+                                raise ValueError("test error")
+                        except ValueError:
+                            pass
 
-        self.assertEqual(2, execute.call_count)
+        mock_wm.assert_called_once()
+        mock_um.assert_called_once()
 
 
 class TestWekaMountSharePath(unittest.TestCase):

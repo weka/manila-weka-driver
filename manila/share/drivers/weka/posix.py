@@ -45,6 +45,7 @@ from oslo_concurrency import processutils
 from oslo_log import log as logging
 
 from manila.share.drivers.weka import exceptions
+from manila.share.drivers.weka import privsep as weka_privsep
 
 LOG = logging.getLogger(__name__)
 
@@ -87,8 +88,6 @@ class WekaMount(object):
     :param sync_on_close: Flush on close (default False).
     :param max_io_size: Override maximum IO size in bytes (optional).
     :param iops_limit: IOPS limit for this mount (optional).
-    :param execute: Callable for shell commands (default:
-        processutils.execute).
     """
 
     def __init__(self, backends, fs_name, mount_point,
@@ -99,8 +98,7 @@ class WekaMount(object):
                  writecache=False,
                  sync_on_close=False,
                  max_io_size=None,
-                 iops_limit=None,
-                 execute=None):
+                 iops_limit=None):
         self.backends = backends
         self.fs_name = fs_name
         self.mount_point = mount_point
@@ -112,7 +110,6 @@ class WekaMount(object):
         self.sync_on_close = sync_on_close
         self.max_io_size = max_io_size
         self.iops_limit = iops_limit
-        self._execute = execute or processutils.execute
         self._lock = _get_mount_lock(mount_point)
 
     # ------------------------------------------------------------------
@@ -162,17 +159,16 @@ class WekaMount(object):
                 source = self.fs_name
             mount_options = self._build_mount_options()
 
-            cmd = ['mount', '-t', 'wekafs']
-            if mount_options:
-                cmd += ['-o', ','.join(mount_options)]
-            cmd += [source, self.mount_point]
-
             LOG.info(
                 "Mounting WekaFS filesystem '%s' at '%s'",
                 self.fs_name, self.mount_point,
             )
             try:
-                self._execute(*cmd, run_as_root=True, root_helper='sudo')
+                weka_privsep.wekafs_mount(
+                    source,
+                    self.mount_point,
+                    ','.join(mount_options) if mount_options else None,
+                )
             except processutils.ProcessExecutionError as exc:
                 raise exceptions.WekaMountError(
                     reason='mount command failed: {}'.format(exc))
@@ -191,17 +187,12 @@ class WekaMount(object):
                 )
                 return
 
-            cmd = ['umount']
-            if force:
-                cmd.append('-l')
-            cmd.append(self.mount_point)
-
             LOG.info(
                 "Unmounting WekaFS filesystem '%s' from '%s'",
                 self.fs_name, self.mount_point,
             )
             try:
-                self._execute(*cmd, run_as_root=True, root_helper='sudo')
+                weka_privsep.umount(self.mount_point, lazy=force)
             except processutils.ProcessExecutionError as exc:
                 raise exceptions.WekaUnmountError(
                     reason='umount command failed: {}'.format(exc))
