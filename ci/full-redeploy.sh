@@ -205,6 +205,24 @@ else
     log "WARNING: tempest.conf missing; skipping tempest [share] config"
 fi
 
+# ── Configure oslo.privsep helper ─────────────────────────────────────────────
+# The driver runs mount/umount/rsync inside manila's sys_admin privsep daemon
+# (manila.privsep.sys_admin_pctxt). This minimal devstack doesn't set up the
+# privsep helper, so launch privsep-helper by full path (authorized via a
+# sudoers rule) and point [manila_sys_admin] at it. Without this the daemon
+# can't start and create_share_from_snapshot fails.
+log "Configuring oslo.privsep helper for manila"
+PRIVSEP_HELPER=/opt/stack/data/venv/bin/privsep-helper
+sudo tee /etc/sudoers.d/weka-privsep-helper >/dev/null <<SUDOERS
+stack ALL=(root) NOPASSWD: ${PRIVSEP_HELPER} *
+SUDOERS
+sudo chmod 440 /etc/sudoers.d/weka-privsep-helper
+set +u
+source "${DEVSTACK_DIR}/functions"
+iniset /etc/manila/manila.conf manila_sys_admin helper_command \
+    "sudo ${PRIVSEP_HELPER} --config-file /etc/manila/manila.conf"
+set -u
+
 # ── Point manila at the live Weka NFS gateway ─────────────────────────────────
 # The CI host is a Weka client, so discover the UP nfs-gateway container's IP.
 # ganesha listens on 0.0.0.0:2049 there; mountable once its host firewall is
