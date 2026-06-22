@@ -88,12 +88,12 @@ from oslo_utils import units
 from manila.common import constants
 from manila import exception
 from manila.i18n import _
+from manila.privsep import weka as weka_privsep
 from manila.share import driver
 from manila.share.drivers.weka import client as weka_client
 from manila.share.drivers.weka import config as weka_config
 from manila.share.drivers.weka import exceptions as weka_exc
 from manila.share.drivers.weka import posix as weka_posix
-from manila.share.drivers.weka import privsep as weka_privsep
 from manila.share.drivers.weka import utils as weka_utils
 
 LOG = logging.getLogger(__name__)

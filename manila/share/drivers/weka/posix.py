@@ -44,8 +44,8 @@ import threading
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 
+from manila.privsep import weka as weka_privsep
 from manila.share.drivers.weka import exceptions
-from manila.share.drivers.weka import privsep as weka_privsep
 
 LOG = logging.getLogger(__name__)
 
