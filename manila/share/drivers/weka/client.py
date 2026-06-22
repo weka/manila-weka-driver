@@ -14,15 +14,12 @@
 
 """Weka REST API client for the Manila share driver.
 
-Implements a complete client for the Weka v2 REST API, covering:
+Implements the subset of the Weka v2 REST API used by the driver:
   - Filesystem lifecycle (CRUD + capacity management)
   - Filesystem groups
-  - Directory quotas and default quotas
-  - Organizations and org-level limits
-  - NFS interface groups, client groups, and permissions
+  - NFS client groups and permissions
   - Snapshots
   - Cluster status / capacity
-  - KMS, LDAP, user management stubs
 
 All unit conversions (GiB <-> bytes) happen in driver.py.
 This client works exclusively in bytes / raw API types.
@@ -41,6 +38,8 @@ from manila.share.drivers.weka import utils
 LOG = logging.getLogger(__name__)
 
 _API_V2 = '/api/v2'
+# Fallback defaults; overridden by weka_api_timeout and
+# weka_max_api_retries config options wired in via do_setup.
 _DEFAULT_TIMEOUT = 30
 _DEFAULT_RETRIES = 3
 
@@ -86,6 +85,8 @@ class WekaApiClient(object):
         self._token_lock = threading.Lock()
 
         self._session = requests.Session()
+        # pool_connections/pool_maxsize are passed from the driver
+        # constructor; callers set them via config options.
         adapter = req_adapters.HTTPAdapter(
             max_retries=0,  # handled manually
             pool_connections=pool_connections,
@@ -328,7 +329,8 @@ class WekaApiClient(object):
         :param encrypted: Whether to enable filesystem encryption.
         :param auth_required: Whether to require mount authentication.
         :param allow_no_space: Whether to allow writes when no space left.
-        :param data_reduction: Data reduction setting (None = cluster default).
+        :param data_reduction: Data reduction setting (None = cluster
+            default).
         :returns: Created filesystem dict.
         """
         payload = {
@@ -380,54 +382,6 @@ class WekaApiClient(object):
         return self._delete(
             '/fileSystems/{uid}'.format(uid=fs_uid), params=params or None)
 
-    def get_filesystem_mount_token(self, fs_uid):
-        """Obtain a short-lived mount token for a filesystem.
-
-        POST /fileSystems/{uid}/mountTokens
-
-        Used when auth_required=True to allow stateless POSIX mounting.
-        """
-        result = self._post(
-            '/fileSystems/{uid}/mountTokens'.format(uid=fs_uid))
-        return result.get('data', result)
-
-    # ------------------------------------------------------------------
-    # Object store bucket attachment
-    # ------------------------------------------------------------------
-
-    def attach_obs_bucket(self, fs_uid, obs_bucket_uid,
-                          mode='writable',
-                          remove_detached=False,
-                          tiering_ssd_percent=None):
-        """Attach an object store bucket to a filesystem for tiering.
-
-        POST /fileSystems/{uid}/objectStoreBuckets
-        """
-        payload = {
-            'obs_bucket_id': obs_bucket_uid,
-            'mode': mode,
-            'remove_detached': remove_detached,
-        }
-        if tiering_ssd_percent is not None:
-            payload['tiering_ssd_percent'] = tiering_ssd_percent
-        result = self._post(
-            '/fileSystems/{uid}/objectStoreBuckets'.format(uid=fs_uid),
-            json=payload,
-        )
-        return result.get('data', result)
-
-    def detach_obs_bucket(self, fs_uid, obs_bucket_id, purge=False):
-        """Detach an object store bucket from a filesystem.
-
-        DELETE /fileSystems/{uid}/objectStoreBuckets/{id}
-        """
-        params = {'purge': purge} if purge else None
-        return self._delete(
-            '/fileSystems/{uid}/objectStoreBuckets/{bid}'.format(
-                uid=fs_uid, bid=obs_bucket_id),
-            params=params,
-        )
-
     # ------------------------------------------------------------------
     # Filesystem group methods
     # ------------------------------------------------------------------
@@ -445,7 +399,8 @@ class WekaApiClient(object):
 
         GET /fileSystemGroups/{uid}
         """
-        result = self._get('/fileSystemGroups/{uid}'.format(uid=group_uid))
+        result = self._get(
+            '/fileSystemGroups/{uid}'.format(uid=group_uid))
         return result.get('data', result)
 
     def get_filesystem_group_by_name(self, name):
@@ -469,272 +424,9 @@ class WekaApiClient(object):
         result = self._post('/fileSystemGroups', json=payload)
         return result.get('data', result)
 
-    def update_filesystem_group(self, group_uid, name=None,
-                                target_ssd_retention=None,
-                                start_demote=None):
-        """Update a filesystem group.
-
-        PUT /fileSystemGroups/{uid}
-        """
-        payload = {}
-        if name is not None:
-            payload['name'] = name
-        if target_ssd_retention is not None:
-            payload['target_ssd_retention'] = target_ssd_retention
-        if start_demote is not None:
-            payload['start_demote'] = start_demote
-        result = self._put(
-            '/fileSystemGroups/{uid}'.format(uid=group_uid), json=payload)
-        return result.get('data', result)
-
-    def delete_filesystem_group(self, group_uid):
-        """Delete a filesystem group.
-
-        DELETE /fileSystemGroups/{uid}
-        """
-        return self._delete('/fileSystemGroups/{uid}'.format(uid=group_uid))
-
-    # ------------------------------------------------------------------
-    # Directory quota methods
-    # ------------------------------------------------------------------
-
-    def list_directory_quotas(self, fs_uid, path=None):
-        """List directory quotas for a filesystem.
-
-        GET /fileSystems/{uid}/quota  (filtered by path if given)
-        """
-        params = {}
-        if path:
-            params['path'] = path
-        result = self._get(
-            '/fileSystems/{uid}/quota'.format(uid=fs_uid),
-            params=params or None,
-        )
-        return result.get('data', result)
-
-    def set_directory_quota(self, fs_uid, inode_id, hard_limit_bytes=None,
-                            soft_limit_bytes=None, grace_seconds=None):
-        """Set a directory quota identified by inode_id.
-
-        POST /fileSystems/{uid}/quota/{inode_id}
-
-        Note: Weka identifies quota targets by inode_id (an integer
-        representing the directory inode number).  The driver resolves
-        the inode_id via a POSIX stat on the mounted share path before
-        calling this method.
-        """
-        payload = {}
-        if hard_limit_bytes is not None:
-            payload['hard_limit_bytes'] = hard_limit_bytes
-        if soft_limit_bytes is not None:
-            payload['soft_limit_bytes'] = soft_limit_bytes
-        if grace_seconds is not None:
-            payload['grace_seconds'] = grace_seconds
-        result = self._post(
-            '/fileSystems/{uid}/quota/{inode}'.format(
-                uid=fs_uid, inode=inode_id),
-            json=payload,
-        )
-        return result.get('data', result)
-
-    def update_directory_quota(self, fs_uid, inode_id,
-                               hard_limit_bytes=None,
-                               soft_limit_bytes=None,
-                               grace_seconds=None):
-        """Update an existing directory quota.
-
-        PATCH /fileSystems/{uid}/quota/{inode_id}
-        """
-        payload = {}
-        if hard_limit_bytes is not None:
-            payload['hard_limit_bytes'] = hard_limit_bytes
-        if soft_limit_bytes is not None:
-            payload['soft_limit_bytes'] = soft_limit_bytes
-        if grace_seconds is not None:
-            payload['grace_seconds'] = grace_seconds
-        result = self._patch(
-            '/fileSystems/{uid}/quota/{inode}'.format(
-                uid=fs_uid, inode=inode_id),
-            json=payload,
-        )
-        return result.get('data', result)
-
-    def delete_directory_quota(self, fs_uid, inode_id):
-        """Remove a directory quota.
-
-        DELETE /fileSystems/{uid}/quota/{inode_id}
-        """
-        return self._delete(
-            '/fileSystems/{uid}/quota/{inode}'.format(
-                uid=fs_uid, inode=inode_id))
-
-    def get_default_quota(self, fs_uid):
-        """Get the default directory quota for a filesystem.
-
-        GET /fileSystems/{uid}/defaultQuota
-        """
-        result = self._get(
-            '/fileSystems/{uid}/defaultQuota'.format(uid=fs_uid))
-        return result.get('data', result)
-
-    def set_default_quota(self, fs_uid, hard_limit_bytes=None,
-                          soft_limit_bytes=None, grace_seconds=None):
-        """Set or update the default directory quota for a filesystem.
-
-        POST /fileSystems/{uid}/defaultQuota
-        """
-        payload = {}
-        if hard_limit_bytes is not None:
-            payload['hard_limit_bytes'] = hard_limit_bytes
-        if soft_limit_bytes is not None:
-            payload['soft_limit_bytes'] = soft_limit_bytes
-        if grace_seconds is not None:
-            payload['grace_seconds'] = grace_seconds
-        result = self._post(
-            '/fileSystems/{uid}/defaultQuota'.format(uid=fs_uid),
-            json=payload,
-        )
-        return result.get('data', result)
-
-    def delete_default_quota(self, fs_uid):
-        """Remove the default directory quota for a filesystem.
-
-        DELETE /fileSystems/{uid}/defaultQuota
-        """
-        return self._delete(
-            '/fileSystems/{uid}/defaultQuota'.format(uid=fs_uid))
-
-    # ------------------------------------------------------------------
-    # Organization methods
-    # ------------------------------------------------------------------
-
-    def list_organizations(self):
-        """Return all organizations.
-
-        GET /organizations
-        """
-        result = self._get('/organizations')
-        return result.get('data', result)
-
-    def get_organization(self, org_uid):
-        """Return a single organization by UID.
-
-        GET /organizations/{uid}
-        """
-        result = self._get('/organizations/{uid}'.format(uid=org_uid))
-        return result.get('data', result)
-
-    def get_organization_by_name(self, name):
-        """Find an organization by name; returns None if not found."""
-        for org in self.list_organizations():
-            if org.get('name') == name:
-                return org
-        return None
-
-    def create_organization(self, name, ssd_quota=None, total_quota=None):
-        """Create a new organization.
-
-        POST /organizations
-        """
-        payload = {'name': name}
-        if ssd_quota is not None:
-            payload['ssd_quota'] = ssd_quota
-        if total_quota is not None:
-            payload['total_quota'] = total_quota
-        result = self._post('/organizations', json=payload)
-        return result.get('data', result)
-
-    def update_organization(self, org_uid, name=None, ssd_quota=None,
-                            total_quota=None):
-        """Update an organization.
-
-        PUT /organizations/{uid}
-        """
-        payload = {}
-        if name is not None:
-            payload['name'] = name
-        if ssd_quota is not None:
-            payload['ssd_quota'] = ssd_quota
-        if total_quota is not None:
-            payload['total_quota'] = total_quota
-        result = self._put(
-            '/organizations/{uid}'.format(uid=org_uid), json=payload)
-        return result.get('data', result)
-
-    def delete_organization(self, org_uid):
-        """Delete an organization.
-
-        DELETE /organizations/{uid}
-        """
-        return self._delete('/organizations/{uid}'.format(uid=org_uid))
-
-    def set_organization_limits(self, org_uid, total_capacity=None,
-                                ssd_capacity=None,
-                                max_download_mbps=None,
-                                max_upload_mbps=None):
-        """Set resource limits on an organization.
-
-        PUT /organizations/{uid}/limits
-        """
-        payload = {}
-        if total_capacity is not None:
-            payload['total_capacity'] = total_capacity
-        if ssd_capacity is not None:
-            payload['ssd_capacity'] = ssd_capacity
-        if max_download_mbps is not None:
-            payload['max_download_mbps'] = max_download_mbps
-        if max_upload_mbps is not None:
-            payload['max_upload_mbps'] = max_upload_mbps
-        result = self._put(
-            '/organizations/{uid}/limits'.format(uid=org_uid), json=payload)
-        return result.get('data', result)
-
-    def set_organization_security(self, org_uid, mode=None):
-        """Configure security settings for an organization.
-
-        PUT /organizations/{uid}/security
-        """
-        payload = {}
-        if mode is not None:
-            payload['mode'] = mode
-        result = self._put(
-            '/organizations/{uid}/security'.format(uid=org_uid), json=payload)
-        return result.get('data', result)
-
     # ------------------------------------------------------------------
     # NFS methods
     # ------------------------------------------------------------------
-
-    def list_interface_groups(self):
-        """Return all NFS interface groups.
-
-        GET /interfaceGroups
-        """
-        result = self._get('/interfaceGroups')
-        return result.get('data', result)
-
-    def create_interface_group(self, name, subnet, gateway=None,
-                               allow_manage_gids=False):
-        """Create an NFS interface group.
-
-        POST /interfaceGroups
-        """
-        payload = {
-            'name': name,
-            'subnet': subnet,
-            'allow_manage_gids': allow_manage_gids,
-        }
-        if gateway:
-            payload['gateway'] = gateway
-        result = self._post('/interfaceGroups', json=payload)
-        return result.get('data', result)
-
-    def delete_interface_group(self, group_uid):
-        """Delete an NFS interface group.
-
-        DELETE /interfaceGroups/{uid}
-        """
-        return self._delete('/interfaceGroups/{uid}'.format(uid=group_uid))
 
     def list_nfs_permissions(self):
         """Return all NFS export permissions.
@@ -777,7 +469,8 @@ class WekaApiClient(object):
 
         DELETE /nfs/permissions/{uid}
         """
-        return self._delete('/nfs/permissions/{uid}'.format(uid=permission_uid))
+        return self._delete(
+            '/nfs/permissions/{uid}'.format(uid=permission_uid))
 
     def list_client_groups(self):
         """Return all NFS client groups.
@@ -810,7 +503,8 @@ class WekaApiClient(object):
         else:
             payload = {'dns': rule_value}
         result = self._post(
-            '/nfs/clientGroups/{uid}/rules'.format(uid=group_uid), json=payload)
+            '/nfs/clientGroups/{uid}/rules'.format(uid=group_uid),
+            json=payload)
         return result.get('data', result)
 
     def get_client_group(self, group_uid):
@@ -818,7 +512,8 @@ class WekaApiClient(object):
 
         GET /nfs/clientGroups/{uid}
         """
-        result = self._get('/nfs/clientGroups/{uid}'.format(uid=group_uid))
+        result = self._get(
+            '/nfs/clientGroups/{uid}'.format(uid=group_uid))
         return result.get('data', result)
 
     def delete_client_group_rule(self, group_uid, rule_uid):
@@ -849,7 +544,8 @@ class WekaApiClient(object):
                         pass
         except Exception:
             pass
-        return self._delete('/nfs/clientGroups/{uid}'.format(uid=group_uid))
+        return self._delete(
+            '/nfs/clientGroups/{uid}'.format(uid=group_uid))
 
     # ------------------------------------------------------------------
     # Snapshot methods
@@ -864,7 +560,8 @@ class WekaApiClient(object):
         result = self._get('/snapshots')
         snaps = result.get('data', result)
         if fs_uid is not None:
-            snaps = [s for s in snaps if s.get('filesystemUid') == fs_uid]
+            snaps = [s for s in snaps
+                     if s.get('filesystemUid') == fs_uid]
         return snaps
 
     def get_snapshot(self, snap_uid):
@@ -895,20 +592,6 @@ class WekaApiClient(object):
         result = self._post('/snapshots', json=payload)
         return result.get('data', result)
 
-    def update_snapshot(self, snap_uid, name=None, is_writable=None):
-        """Update snapshot attributes.
-
-        PUT /snapshots/{uid}
-        """
-        payload = {}
-        if name is not None:
-            payload['name'] = name
-        if is_writable is not None:
-            payload['is_writable'] = is_writable
-        result = self._put(
-            '/snapshots/{uid}'.format(uid=snap_uid), json=payload)
-        return result.get('data', result)
-
     def delete_snapshot(self, snap_uid):
         """Delete a snapshot.
 
@@ -919,7 +602,7 @@ class WekaApiClient(object):
     def restore_snapshot(self, snap_uid, fs_uid):
         """Restore (revert) a filesystem to a snapshot.
 
-        Weka v5 changed the endpoint to include the filesystem UID as well:
+        Weka v5 changed the endpoint to include the filesystem UID:
         POST /snapshots/{fs_uid}/{uid}/restore  (Weka 5.x)
         """
         result = self._post(
@@ -955,180 +638,3 @@ class WekaApiClient(object):
             for d in drives
         )
         return {'totalBytes': total_bytes, 'usedBytes': used_bytes}
-
-    def get_cluster_info(self):
-        """Return cluster information (name, version, nodes).
-
-        GET /cluster
-        """
-        result = self._get('/cluster')
-        return result.get('data', result)
-
-    # ------------------------------------------------------------------
-    # User management
-    # ------------------------------------------------------------------
-
-    def list_users(self):
-        """Return all users in the current organization.
-
-        GET /users
-        """
-        result = self._get('/users')
-        return result.get('data', result)
-
-    def create_user(self, username, password, role='Regular',
-                    posix_uid=None, posix_gid=None):
-        """Create a user.
-
-        POST /users
-        """
-        payload = {
-            'username': username,
-            'password': password,
-            'role': role,
-        }
-        if posix_uid is not None:
-            payload['posix_uid'] = posix_uid
-        if posix_gid is not None:
-            payload['posix_gid'] = posix_gid
-        result = self._post('/users', json=payload)
-        return result.get('data', result)
-
-    def delete_user(self, user_uid):
-        """Delete a user.
-
-        DELETE /users/{uid}
-        """
-        return self._delete('/users/{uid}'.format(uid=user_uid))
-
-    # ------------------------------------------------------------------
-    # KMS stubs
-    # ------------------------------------------------------------------
-
-    def get_kms_config(self):
-        """Return KMS configuration.
-
-        GET /kms
-        """
-        result = self._get('/kms')
-        return result.get('data', result)
-
-    def set_kms_config(self, kms_type, master_key_url, token=None,
-                       base_url=None):
-        """Configure KMS (Key Management Service).
-
-        POST /kms
-        """
-        payload = {
-            'kms_type': kms_type,
-            'master_key_url': master_key_url,
-        }
-        if token:
-            payload['token'] = token
-        if base_url:
-            payload['base_url'] = base_url
-        result = self._post('/kms', json=payload)
-        return result.get('data', result)
-
-    # ------------------------------------------------------------------
-    # LDAP stubs
-    # ------------------------------------------------------------------
-
-    def get_ldap_config(self):
-        """Return LDAP/Active Directory configuration.
-
-        GET /ldap
-        """
-        result = self._get('/ldap')
-        return result.get('data', result)
-
-    # ------------------------------------------------------------------
-    # S3 bucket management stubs
-    # ------------------------------------------------------------------
-
-    def list_s3_buckets(self):
-        """Return all S3 buckets.
-
-        GET /s3/buckets
-        """
-        result = self._get('/s3/buckets')
-        return result.get('data', result)
-
-    def create_s3_bucket(self, name, fs_uid, path='/'):
-        """Create an S3 bucket backed by a Weka filesystem.
-
-        POST /s3/buckets
-        """
-        payload = {'name': name, 'filesystem_id': fs_uid, 'path': path}
-        result = self._post('/s3/buckets', json=payload)
-        return result.get('data', result)
-
-    def delete_s3_bucket(self, bucket_name):
-        """Delete an S3 bucket.
-
-        DELETE /s3/buckets/{name}
-        """
-        return self._delete('/s3/buckets/{name}'.format(name=bucket_name))
-
-    # ------------------------------------------------------------------
-    # Object store bucket definitions (cluster-level)
-    # ------------------------------------------------------------------
-
-    def list_obs_buckets(self):
-        """Return all object store bucket definitions.
-
-        GET /objectStoreBuckets
-        """
-        result = self._get('/objectStoreBuckets')
-        return result.get('data', result)
-
-    def create_obs_bucket(self, name, obs_name, bucket_name,
-                          access_key_id=None, secret_access_key=None,
-                          region=None, endpoint=None):
-        """Define a new object store bucket for tiering.
-
-        POST /objectStoreBuckets
-        """
-        payload = {
-            'name': name,
-            'obs_name': obs_name,
-            'bucket_name': bucket_name,
-        }
-        if access_key_id:
-            payload['access_key_id'] = access_key_id
-        if secret_access_key:
-            payload['secret_access_key'] = secret_access_key
-        if region:
-            payload['region'] = region
-        if endpoint:
-            payload['endpoint'] = endpoint
-        result = self._post('/objectStoreBuckets', json=payload)
-        return result.get('data', result)
-
-    def delete_obs_bucket(self, obs_bucket_uid):
-        """Delete an object store bucket definition.
-
-        DELETE /objectStoreBuckets/{uid}
-        """
-        return self._delete(
-            '/objectStoreBuckets/{uid}'.format(uid=obs_bucket_uid))
-
-    # ------------------------------------------------------------------
-    # Security (TLS / certificates)
-    # ------------------------------------------------------------------
-
-    def get_tls_config(self):
-        """Return TLS configuration.
-
-        GET /security/tls
-        """
-        result = self._get('/security/tls')
-        return result.get('data', result)
-
-    def get_security_config(self):
-        """Return global security configuration.
-
-        GET /security
-        """
-        result = self._get('/security')
-        return result.get('data', result)

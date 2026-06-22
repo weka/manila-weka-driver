@@ -241,15 +241,6 @@ class TestWekaApiClientFilesystems(unittest.TestCase):
             result = self.client.get_filesystem_by_name('nonexistent')
         self.assertIsNone(result)
 
-    def test_get_filesystem_mount_token(self):
-        token = fakes.fake_mount_token()
-        resp = _make_response(200, {'data': token})
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            result = self.client.get_filesystem_mount_token(
-                fakes.FAKE_FS_UID)
-        self.assertEqual(token, result)
-
 
 class TestWekaApiClientFilesystemGroups(unittest.TestCase):
 
@@ -327,7 +318,7 @@ class TestWekaApiClientSnapshots(unittest.TestCase):
             result = self.client.restore_snapshot(
                 fakes.FAKE_SNAP_UID, fakes.FAKE_FS_UID)
         self.assertIsNotNone(result)
-        # Verify the v5 endpoint includes both fs_uid and snap_uid in the path
+        # Verify the v5 endpoint includes both fs_uid and snap_uid in path
         url = mock_req.call_args[1].get('url') or mock_req.call_args[0][1]
         self.assertIn(fakes.FAKE_FS_UID, url)
         self.assertIn(fakes.FAKE_SNAP_UID, url)
@@ -371,29 +362,6 @@ class TestWekaApiClientSnapshots(unittest.TestCase):
         with mock.patch.object(self.client, 'list_snapshots',
                                return_value=[]):
             result = self.client.get_snapshot_by_name('missing')
-        self.assertIsNone(result)
-
-
-class TestWekaApiClientOrganizations(unittest.TestCase):
-
-    def setUp(self):
-        self.client = weka_client.WekaApiClient(
-            host='weka-test', username='admin', password='secret',
-            ssl_verify=False, timeout=5, max_retries=0)
-        self.client._access_token = 'tok'
-
-    def test_create_organization(self):
-        org = fakes.fake_organization()
-        resp = _make_response(200, {'data': org})
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            result = self.client.create_organization('TestOrg')
-        self.assertEqual(org, result)
-
-    def test_get_organization_by_name_not_found(self):
-        with mock.patch.object(self.client, 'list_organizations',
-                               return_value=[]):
-            result = self.client.get_organization_by_name('missing')
         self.assertIsNone(result)
 
 
@@ -489,80 +457,8 @@ class TestWekaApiClientCapacity(unittest.TestCase):
         self.assertEqual(status, result)
 
 
-class TestWekaApiClientQuotas(unittest.TestCase):
-
-    def setUp(self):
-        self.client = weka_client.WekaApiClient(
-            host='weka-test', username='admin', password='secret',
-            ssl_verify=False, timeout=5, max_retries=0)
-        self.client._access_token = 'tok'
-
-    def _ok(self, data=None):
-        return _make_response(200, {'data': data or {}})
-
-    def test_list_directory_quotas(self):
-        quota = fakes.fake_quota()
-        resp = _make_response(200, {'data': [quota]})
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            result = self.client.list_directory_quotas(fakes.FAKE_FS_UID)
-        self.assertEqual([quota], result)
-
-    def test_set_directory_quota(self):
-        quota = fakes.fake_quota()
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=self._ok(quota)):
-            result = self.client.set_directory_quota(
-                fakes.FAKE_FS_UID, inode_id=12345,
-                hard_limit_bytes=10 * 1024 ** 3)
-        self.assertEqual(quota, result)
-
-    def test_update_directory_quota(self):
-        quota = fakes.fake_quota()
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=self._ok(quota)):
-            result = self.client.update_directory_quota(
-                fakes.FAKE_FS_UID, inode_id=12345,
-                hard_limit_bytes=20 * 1024 ** 3)
-        self.assertEqual(quota, result)
-
-    def test_delete_directory_quota(self):
-        resp = _make_response(200, {})
-        resp.content = b''
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            self.client.delete_directory_quota(fakes.FAKE_FS_UID, 12345)
-
-    def test_get_default_quota(self):
-        quota = fakes.fake_quota()
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=self._ok(quota)):
-            result = self.client.get_default_quota(fakes.FAKE_FS_UID)
-        self.assertEqual(quota, result)
-
-    def test_set_default_quota(self):
-        quota = fakes.fake_quota()
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=self._ok(quota)):
-            result = self.client.set_default_quota(
-                fakes.FAKE_FS_UID, hard_limit_bytes=5 * 1024 ** 3)
-        self.assertEqual(quota, result)
-
-    def test_delete_default_quota(self):
-        resp = _make_response(200, {})
-        resp.content = b''
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            self.client.delete_default_quota(fakes.FAKE_FS_UID)
-
-
 class TestWekaApiClientSDKStubs(unittest.TestCase):
-    """Smoke tests for SDK stub methods.
-
-    Not called by driver but part of the public client API.  Validates
-    that every stub method makes the expected HTTP call to the correct
-    path.
-    """
+    """Smoke tests for NFS client group methods."""
 
     def setUp(self):
         self.client = weka_client.WekaApiClient(
@@ -584,65 +480,6 @@ class TestWekaApiClientSDKStubs(unittest.TestCase):
         return mock.patch.object(
             self.client._session, 'request', side_effect=check)
 
-    def test_get_cluster_info(self):
-        with self._patch_request('GET', '/cluster', {'name': 'c'}):
-            self.client.get_cluster_info()
-
-    def test_list_users(self):
-        with self._patch_request('GET', '/users', []):
-            self.client.list_users()
-
-    def test_create_user(self):
-        with self._patch_request('POST', '/users', {'uid': 'u1'}):
-            self.client.create_user('bob', 'pass')
-
-    def test_delete_user(self):
-        resp = _make_response(200, {})
-        resp.content = b''
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            self.client.delete_user('uid-1')
-
-    def test_get_kms_config(self):
-        with self._patch_request('GET', '/kms', {}):
-            self.client.get_kms_config()
-
-    def test_get_ldap_config(self):
-        with self._patch_request('GET', '/ldap', {}):
-            self.client.get_ldap_config()
-
-    def test_get_tls_config(self):
-        with self._patch_request('GET', '/security/tls', {}):
-            self.client.get_tls_config()
-
-    def test_get_security_config(self):
-        with self._patch_request('GET', '/security', {}):
-            self.client.get_security_config()
-
-    def test_list_s3_buckets(self):
-        with self._patch_request('GET', '/s3/buckets', []):
-            self.client.list_s3_buckets()
-
-    def test_list_obs_buckets(self):
-        with self._patch_request('GET', '/objectStoreBuckets', []):
-            self.client.list_obs_buckets()
-
-    def test_attach_obs_bucket(self):
-        with self._patch_request('POST', '/objectStoreBuckets', {}):
-            self.client.attach_obs_bucket(
-                fakes.FAKE_FS_UID, 'obs-uid-1')
-
-    def test_detach_obs_bucket(self):
-        resp = _make_response(200, {})
-        resp.content = b''
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            self.client.detach_obs_bucket(fakes.FAKE_FS_UID, 'obs-bid-1')
-
-    def test_list_interface_groups(self):
-        with self._patch_request('GET', '/interfaceGroups', []):
-            self.client.list_interface_groups()
-
     def test_list_nfs_permissions(self):
         with self._patch_request('GET', '/nfs/permissions', []):
             self.client.list_nfs_permissions()
@@ -657,57 +494,6 @@ class TestWekaApiClientSDKStubs(unittest.TestCase):
         with mock.patch.object(self.client._session, 'request',
                                return_value=resp):
             self.client.delete_client_group('cg-1')
-
-    def test_update_snapshot(self):
-        snap = fakes.fake_snapshot()
-        resp = _make_response(200, {'data': snap})
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            result = self.client.update_snapshot(
-                fakes.FAKE_SNAP_UID, is_writable=True)
-        self.assertEqual(snap, result)
-
-    def test_update_organization(self):
-        org = fakes.fake_organization()
-        resp = _make_response(200, {'data': org})
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            result = self.client.update_organization(
-                fakes.FAKE_ORG_UID, name='NewName')
-        self.assertEqual(org, result)
-
-    def test_delete_organization(self):
-        resp = _make_response(200, {})
-        resp.content = b''
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            self.client.delete_organization(fakes.FAKE_ORG_UID)
-
-    def test_set_organization_limits(self):
-        with self._patch_request('PUT', '/organizations', {}):
-            self.client.set_organization_limits(
-                fakes.FAKE_ORG_UID, total_capacity=100 * 1024 ** 3)
-
-    def test_set_organization_security(self):
-        with self._patch_request('PUT', '/organizations', {}):
-            self.client.set_organization_security(
-                fakes.FAKE_ORG_UID, mode='strict')
-
-    def test_update_filesystem_group(self):
-        grp = fakes.fake_filesystem_group()
-        resp = _make_response(200, {'data': grp})
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            result = self.client.update_filesystem_group(
-                fakes.FAKE_GROUP_UID, name='new-name')
-        self.assertEqual(grp, result)
-
-    def test_delete_filesystem_group(self):
-        resp = _make_response(200, {})
-        resp.content = b''
-        with mock.patch.object(self.client._session, 'request',
-                               return_value=resp):
-            self.client.delete_filesystem_group(fakes.FAKE_GROUP_UID)
 
 
 if __name__ == '__main__':

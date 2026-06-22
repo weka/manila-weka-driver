@@ -15,8 +15,8 @@
 """OpenStack Manila share driver for Weka storage (WekaFS POSIX client).
 
 This driver exposes Weka filesystems as Manila shares using the WekaFS
-POSIX client for primary access.  NFS is supported as a secondary protocol
-for compatibility with legacy clients.
+POSIX client for primary access.  NFS is supported as a secondary
+protocol for compatibility with legacy clients.
 
 Architecture
 ------------
@@ -37,7 +37,7 @@ Configuration example (manila.conf)
   enabled_share_backends = weka
 
   [weka]
-  share_driver = manila.share.drivers.weka.driver:WekaShareDriver
+  share_driver = manila.share.drivers.weka.driver.WekaShareDriver
   share_backend_name = weka
   driver_handles_share_servers = false
   snapshot_support = true
@@ -61,12 +61,25 @@ Critical implementation notes
   - The share UUID is used as the Weka filesystem name (with prefix).
   - The Weka filesystem UID is stored in the share's export metadata so
     subsequent operations never need to scan all filesystems.
+
+Known limitations
+-----------------
+  - create_share_from_snapshot runs the data copy in a background
+    eventlet greenlet.  If the manila-share process restarts mid-copy
+    the in-memory status is lost; get_share_status will conservatively
+    return 'available' in that case.  The NFS copy path requires
+    weka_nfs_server to be configured; an unconfigured NFS share raises
+    ShareBackendException before filesystem creation begins.
 """
 
 import ipaddress
 import os
 import socket
+import tempfile
+import threading
 import time
+
+import eventlet
 
 from oslo_concurrency import processutils
 from oslo_config import cfg
@@ -105,14 +118,12 @@ def _cidr_to_weka_ip(cidr_str):
     Weka v5 client group rules require dotted-decimal subnet masks
     (e.g. 192.168.1.0/255.255.255.0) rather than CIDR prefix notation
     (e.g. 192.168.1.0/24).  Single IP addresses are returned unchanged.
+    Raises ValueError for non-IPv4 inputs.
     """
     if '/' not in cidr_str:
         return cidr_str
-    try:
-        net = ipaddress.IPv4Network(cidr_str, strict=False)
-        return '{}/{}'.format(str(net.network_address), str(net.netmask))
-    except ValueError:
-        return cidr_str
+    net = ipaddress.IPv4Network(cidr_str, strict=False)
+    return '{}/{}'.format(str(net.network_address), str(net.netmask))
 
 
 def _is_already_exists_error(exc):
@@ -128,6 +139,15 @@ def _is_already_exists_error(exc):
     return 'already exist' in str(exc).lower()
 
 
+def _is_ipv6(access_to):
+    """Return True if the access_to value is an IPv6 address or network."""
+    try:
+        ipaddress.IPv6Network(access_to, strict=False)
+        return True
+    except ValueError:
+        return False
+
+
 class WekaShareDriver(driver.ShareDriver):
     """Manila share driver for Weka storage using the WekaFS POSIX client.
 
@@ -140,12 +160,14 @@ class WekaShareDriver(driver.ShareDriver):
     - delete_share            (idempotent)
     - extend_share
     - shrink_share            (with in-use capacity check)
-    - ensure_share
+    - ensure_shares           (bulk; replaces ensure_share)
+    - get_backend_info
     - update_access           (ip and user rules; add / delete / full-sync)
     - create_snapshot
     - delete_snapshot         (idempotent)
     - revert_to_snapshot
-    - create_share_from_snapshot
+    - create_share_from_snapshot  (async background copy)
+    - get_share_status
     - get_share_stats
     - manage_existing / unmanage
     """
@@ -154,10 +176,20 @@ class WekaShareDriver(driver.ShareDriver):
     _is_driver_handles_share_servers = False
 
     def __init__(self, *args, **kwargs):
+        """Initialise driver state; API client created in do_setup."""
         super(WekaShareDriver, self).__init__(
             False, *args, config_opts=[weka_config.weka_opts], **kwargs)
         self._client = None
         self._fs_group_uid = None
+        # Async copy tracking:
+        #   share_id -> {'status': str, 'fs_uid': str, 'fs_name': str}
+        # NOTE: state is in-memory only; lost on manila-share restart.
+        # On the next get_share_status call after restart the driver
+        # returns 'available' with a warning (documented limitation).
+        self._async_copies = {}
+        self._async_copies_lock = threading.Lock()
+        # Capability: NFS copy requires weka_nfs_server; set in do_setup.
+        self._nfs_server = None
 
     # ------------------------------------------------------------------
     # Setup / validation
@@ -196,6 +228,9 @@ class WekaShareDriver(driver.ShareDriver):
         )
         self._client.login()
 
+        # Cache the NFS server for capability reporting.
+        self._nfs_server = cfg_get('weka_nfs_server')
+
         # Verify connectivity and log cluster version.
         try:
             status = self._client.get_cluster_status()
@@ -211,6 +246,13 @@ class WekaShareDriver(driver.ShareDriver):
             "(Weka version %s)",
             DRIVER_VERSION, cluster_name, cluster_version,
         )
+
+        if not self._nfs_server:
+            LOG.warning(
+                "weka_nfs_server not configured; "
+                "create_share_from_snapshot will be unavailable "
+                "for NFS shares."
+            )
 
         # Ensure the default filesystem group exists.
         group_name = cfg_get('weka_filesystem_group') or 'default'
@@ -256,8 +298,8 @@ class WekaShareDriver(driver.ShareDriver):
                     message=_(
                         'Weka driver: API authentication failed: %s') % exc)
             except Exception as exc:
-                LOG.warning("Could not verify cluster status during setup: %s",
-                            exc)
+                LOG.warning(
+                    "Could not verify cluster status during setup: %s", exc)
 
     # ------------------------------------------------------------------
     # Share lifecycle
@@ -285,7 +327,7 @@ class WekaShareDriver(driver.ShareDriver):
         group_name = (self.configuration.safe_get('weka_filesystem_group')
                       or 'default')
 
-        LOG.info(
+        LOG.debug(
             "Creating share %s (protocol %s, size %s GiB) "
             "as Weka filesystem '%s'",
             share['id'], share_proto, share['size'], fs_name,
@@ -305,131 +347,150 @@ class WekaShareDriver(driver.ShareDriver):
 
     def create_share_from_snapshot(self, context, share, snapshot,
                                    share_server=None, parent_share=None):
-        """Create a new share populated with data from a snapshot.
+        """Create a new share populated with data from a snapshot (async).
 
-        Creates a new Weka filesystem, then copies the snapshot contents
-        using the share's own protocol: WEKAFS shares copy over the Weka
-        POSIX client (no NFS gateway required); NFS shares copy over NFS
-        so a node without the Weka client installed can still serve them.
+        Creates the destination filesystem synchronously, then starts
+        the data copy in a background thread.  Returns immediately with
+        STATUS_CREATING_FROM_SNAPSHOT so Manila can poll get_share_status.
+
+        The NFS copy path requires weka_nfs_server to be configured.
+        WEKAFS copy works without that option.
+
+        Known limitation: if the manila-share process restarts while a
+        copy is in progress the in-memory status is lost; on the next
+        call to get_share_status the driver conservatively returns
+        'available' and logs a warning.
 
         :param context: Request context.
         :param share: New share model dict.
         :param snapshot: Source snapshot model dict.
         :param share_server: Unused.
-        :returns: List of export location dicts.
+        :returns: Dict with 'status' and 'export_locations'.
         """
+        share_proto = share['share_proto'].upper()
+
+        # Fail fast: NFS copy requires weka_nfs_server to be configured.
+        if share_proto == _NFS_PROTO and not self._nfs_server:
+            raise exception.ShareBackendException(
+                msg=_(
+                    'weka_nfs_server must be configured to create '
+                    'an NFS share from a snapshot'
+                )
+            )
+
         snap_name = self._snapshot_name(snapshot['id'])
 
         snap = self._client.get_snapshot_by_name(snap_name)
         if not snap:
-            raise exception.SnapshotNotFound(snapshot_id=snapshot['id'])
+            raise exception.ShareSnapshotNotFound(snapshot_id=snapshot['id'])
 
-        # Resolve the source filesystem name from the snapshot's filesystemUid.
+        # Resolve the source filesystem name from the snapshot's fs UID.
         src_fs = self._client.get_filesystem(snap['filesystemUid'])
         src_fs_name = src_fs['name']
 
         new_fs_name = self._share_name(share['id'])
-        share_proto = share['share_proto'].upper()
         group_name = (self.configuration.safe_get('weka_filesystem_group')
                       or 'default')
         size_bytes = weka_utils.gb_to_bytes(share['size'])
 
-        LOG.info(
-            "Creating share %s from snapshot %s (src fs: %s, snap: %s)",
-            share['id'], snapshot['id'], src_fs_name, snap_name,
-        )
-
         fs = self._create_filesystem_idempotent(
             new_fs_name, group_name, size_bytes)
-
-        # The data copy uses the share's own protocol: WEKAFS shares copy
-        # over the Weka POSIX client (no NFS gateway required); NFS shares
-        # copy over NFS so the node need not have the Weka client installed.
-        if share_proto == _WEKAFS_PROTO:
-            self._copy_snapshot_wekafs(
-                src_fs_name, new_fs_name, snap, snap_name, share, snapshot)
-        else:
-            self._copy_snapshot_nfs(
-                src_fs_name, new_fs_name, snap, snap_name, share, snapshot)
+        fs_uid = fs['uid']
 
         export_locations = self._build_export_locations(
-            share, new_fs_name, fs['uid'], share_proto)
-        return export_locations
+            share, new_fs_name, fs_uid, share_proto)
 
-    def _copy_snapshot_wekafs(self, src_fs_name, new_fs_name,
-                              snap, snap_name, share, snapshot):
-        """Copy snapshot data into new_fs_name over the WekaFS POSIX client.
+        with self._async_copies_lock:
+            self._async_copies[share['id']] = {
+                'status': constants.STATUS_CREATING_FROM_SNAPSHOT,
+                'fs_uid': fs_uid,
+                'fs_name': new_fs_name,
+            }
 
-        Mounts both the source and destination filesystems using the Weka
-        kernel client (backends=None — joined client) and rsyncs the
-        snapshot directory (.snapshots/<accessPoint>/) to the new filesystem.
-        Mounts are always cleaned up in a finally block.
+        LOG.debug(
+            "Starting background copy for share %s from snapshot %s "
+            "(src fs: %s, snap: %s, proto: %s)",
+            share['id'], snapshot['id'], src_fs_name, snap_name, share_proto,
+        )
+
+        eventlet.spawn(
+            self._run_snapshot_copy,
+            share, snapshot, snap, src_fs_name, new_fs_name, share_proto,
+        )
+
+        return {
+            'status': constants.STATUS_CREATING_FROM_SNAPSHOT,
+            'export_locations': export_locations,
+        }
+
+    def _run_snapshot_copy(self, share, snapshot, snap,
+                           src_fs_name, new_fs_name, share_proto):
+        """Background worker: copy snapshot data into the new filesystem.
+
+        Dispatches to _copy_snapshot_nfs or _copy_snapshot_wekafs.
+        Updates self._async_copies[share['id']] status on completion.
+        The fs_uid and fs_name stored at copy-start are preserved so
+        get_share_status does not need an API call on completion.
         """
-        net = self.configuration.safe_get('weka_net_device')
-        src_mnt = '/tmp/manila_snap_src_{}'.format(share['id'][:8])
-        dst_mnt = '/tmp/manila_snap_dst_{}'.format(share['id'][:8])
-        # backends=None: Manila host is a joined Weka client; mount by bare
-        # fs name to reuse the existing cluster attachment.
-        src_mount = weka_posix.WekaMount(
-            backends=None, fs_name=src_fs_name, mount_point=src_mnt,
-            net=net)
-        dst_mount = weka_posix.WekaMount(
-            backends=None, fs_name=new_fs_name, mount_point=dst_mnt,
-            net=net)
-
+        share_id = share['id']
         try:
-            src_mount.mount()
-            dst_mount.mount()
-
-            snap_dir = os.path.join(
-                src_mnt, '.snapshots',
-                snap.get('accessPoint') or snap_name)
-
-            LOG.info("Rsyncing snapshot data from %s to %s",
-                     snap_dir, dst_mnt)
-            processutils.execute(
-                'rsync', '-a',
-                snap_dir.rstrip('/') + '/',
-                dst_mnt.rstrip('/') + '/',
-                run_as_root=True, root_helper='sudo',
-            )
+            if share_proto == _NFS_PROTO:
+                self._copy_snapshot_nfs(
+                    share, snapshot, snap, src_fs_name, new_fs_name)
+            else:
+                self._copy_snapshot_wekafs(
+                    share, snapshot, snap, src_fs_name, new_fs_name)
             LOG.info(
-                "Copied snapshot %s content to new filesystem %s via "
-                "WekaFS", snap_name, new_fs_name,
+                "Background copy complete for share %s from snapshot %s",
+                share_id, snapshot['id'],
             )
-        except Exception as exc:
-            LOG.error(
-                "Failed to populate share %s from snapshot %s: %s",
-                share['id'], snapshot['id'], exc,
+            with self._async_copies_lock:
+                entry = self._async_copies.get(share_id, {})
+                entry['status'] = constants.STATUS_AVAILABLE
+                self._async_copies[share_id] = entry
+        except Exception:
+            LOG.exception(
+                "Background copy failed for share %s from snapshot %s",
+                share_id, snapshot['id'],
             )
-            raise
-        finally:
-            for mount_obj in (dst_mount, src_mount):
-                try:
-                    mount_obj.unmount()
-                except Exception as e:
-                    LOG.warning("Failed to unmount %s: %s",
-                                mount_obj.mount_point, e)
-            for mnt in (src_mnt, dst_mnt):
-                try:
-                    os.rmdir(mnt)
-                except Exception:
-                    pass
+            with self._async_copies_lock:
+                entry = self._async_copies.get(share_id, {})
+                entry['status'] = constants.STATUS_ERROR
+                self._async_copies[share_id] = entry
 
-    def _copy_snapshot_nfs(self, src_fs_name, new_fs_name, snap,
-                           snap_name, share, snapshot):
-        """Copy snapshot data into new_fs_name over NFS.
+    def _rsync_snapshot(self, src_snap_dir, dst_mnt):
+        """Rsync snapshot directory contents into a destination mount.
 
-        Requires weka_nfs_server to be configured. Creates a temporary
-        client group and NFS permissions, mounts both filesystems locally
-        via NFS v3, rsyncs the snapshot directory, then removes all
-        temporary resources in a finally block.
+        Shared by _copy_snapshot_nfs and _copy_snapshot_wekafs so that
+        rsync flags live in one place.
+
+        :param src_snap_dir: Absolute path to the snapshot source dir.
+        :param dst_mnt: Absolute path to the destination mount root.
         """
-        nfs_server = self.configuration.safe_get('weka_nfs_server')
+        LOG.info("Rsyncing snapshot data from %s to %s",
+                 src_snap_dir, dst_mnt)
+        processutils.execute(
+            'rsync', '-a',
+            src_snap_dir.rstrip('/') + '/',
+            dst_mnt.rstrip('/') + '/',
+            run_as_root=True,
+        )
+
+    def _copy_snapshot_nfs(self, share, snapshot, snap,
+                           src_fs_name, new_fs_name):
+        """Copy snapshot data via NFS mounts.
+
+        Requires weka_nfs_server to be configured (caller must verify).
+        Mount directories are created in a secure tempdir and cleaned up
+        unconditionally in the finally block.
+        """
+        nfs_server = self._nfs_server
         if not nfs_server:
             raise exception.ManilaException(
                 message=_('weka_nfs_server must be configured for '
                           'create_share_from_snapshot'))
+
+        snap_name = self._snapshot_name(snapshot['id'])
 
         # Determine the local IP that routes to the NFS server.
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -444,8 +505,8 @@ class WekaShareDriver(driver.ShareDriver):
         tmp_cg_name = 'manila-snap-{}'.format(share['id'][:8])
         cg_uid = None
         rule_uid = None
-        src_mnt = '/tmp/manila_snap_src_{}'.format(share['id'][:8])
-        dst_mnt = '/tmp/manila_snap_dst_{}'.format(share['id'][:8])
+        src_mnt = tempfile.mkdtemp(prefix='manila_weka_snap_src_')
+        dst_mnt = tempfile.mkdtemp(prefix='manila_weka_snap_dst_')
         src_mounted = False
         dst_mounted = False
 
@@ -454,8 +515,7 @@ class WekaShareDriver(driver.ShareDriver):
             cg_uid = cg['uid']
             rule = self._client.add_client_group_rule(
                 cg_uid, 'IP', local_ip)
-            rule_uid = (rule.get('uid')
-                        if isinstance(rule, dict) else None)
+            rule_uid = rule.get('uid') if isinstance(rule, dict) else None
 
             self._client.create_nfs_permission(
                 client_group=tmp_cg_name,
@@ -475,14 +535,11 @@ class WekaShareDriver(driver.ShareDriver):
             # Allow the NFS server to apply the new permissions.
             time.sleep(5)
 
-            os.makedirs(src_mnt, exist_ok=True)
-            os.makedirs(dst_mnt, exist_ok=True)
-
             processutils.execute(
                 'mount', '-t', 'nfs',
                 '{}:/{}'.format(nfs_server, src_fs_name),
                 src_mnt,
-                run_as_root=True, root_helper='sudo',
+                run_as_root=True,
             )
             src_mounted = True
 
@@ -490,45 +547,29 @@ class WekaShareDriver(driver.ShareDriver):
                 'mount', '-t', 'nfs',
                 '{}:/{}'.format(nfs_server, new_fs_name),
                 dst_mnt,
-                run_as_root=True, root_helper='sudo',
+                run_as_root=True,
             )
             dst_mounted = True
 
+            snap_access_point = snap.get('accessPoint') or snap_name
             snap_dir = os.path.join(
-                src_mnt, '.snapshots',
-                snap.get('accessPoint') or snap_name)
-
-            LOG.info("Rsyncing snapshot data from %s to %s",
-                     snap_dir, dst_mnt)
-            processutils.execute(
-                'rsync', '-a',
-                snap_dir.rstrip('/') + '/',
-                dst_mnt.rstrip('/') + '/',
-                run_as_root=True, root_helper='sudo',
-            )
+                src_mnt, '.snapshots', snap_access_point)
+            self._rsync_snapshot(snap_dir, dst_mnt)
             LOG.info(
-                "Copied snapshot %s content to new filesystem %s via NFS",
+                "Copied snapshot %s content to filesystem %s via NFS",
                 snap_name, new_fs_name,
             )
-        except Exception as exc:
-            LOG.error(
-                "Failed to populate share %s from snapshot %s: %s",
-                share['id'], snapshot['id'], exc,
-            )
-            raise
         finally:
             if dst_mounted:
                 try:
                     processutils.execute(
-                        'umount', dst_mnt,
-                        run_as_root=True, root_helper='sudo')
+                        'umount', dst_mnt, run_as_root=True)
                 except Exception as e:
                     LOG.warning("Failed to umount %s: %s", dst_mnt, e)
             if src_mounted:
                 try:
                     processutils.execute(
-                        'umount', src_mnt,
-                        run_as_root=True, root_helper='sudo')
+                        'umount', src_mnt, run_as_root=True)
                 except Exception as e:
                     LOG.warning("Failed to umount %s: %s", src_mnt, e)
             for mnt in (src_mnt, dst_mnt):
@@ -562,13 +603,102 @@ class WekaShareDriver(driver.ShareDriver):
                         "Failed to delete client group %s: %s",
                         tmp_cg_name, e)
 
+    def _copy_snapshot_wekafs(self, share, snapshot, snap,
+                              src_fs_name, new_fs_name):
+        """Copy snapshot data via WEKAFS POSIX mounts (context manager)."""
+        snap_name = self._snapshot_name(snapshot['id'])
+        num_cores = (
+            self.configuration.safe_get('weka_num_cores') or 1)
+        net = self.configuration.safe_get('weka_net_device')
+        backends = self._get_backends()
+
+        src_mnt = tempfile.mkdtemp(prefix='manila_weka_snap_src_')
+        dst_mnt = tempfile.mkdtemp(prefix='manila_weka_snap_dst_')
+        try:
+            with weka_posix.WekaMount(
+                backends=backends,
+                fs_name=src_fs_name,
+                mount_point=src_mnt,
+                num_cores=num_cores,
+                net=net,
+            ):
+                with weka_posix.WekaMount(
+                    backends=backends,
+                    fs_name=new_fs_name,
+                    mount_point=dst_mnt,
+                    num_cores=num_cores,
+                    net=net,
+                ):
+                    snap_access_point = (
+                        snap.get('accessPoint') or snap_name)
+                    snap_dir = os.path.join(
+                        src_mnt, '.snapshots', snap_access_point)
+                    self._rsync_snapshot(snap_dir, dst_mnt)
+                    LOG.info(
+                        "Copied snapshot %s to filesystem %s via WekaFS",
+                        snap_name, new_fs_name,
+                    )
+        finally:
+            for mnt in (src_mnt, dst_mnt):
+                try:
+                    os.rmdir(mnt)
+                except Exception:
+                    pass
+
+    def get_share_status(self, context, share, share_server=None):
+        """Return the current status of an async share creation.
+
+        Reads the in-memory copy-state map updated by _run_snapshot_copy.
+        The map stores {'status', 'fs_uid', 'fs_name'} so that the
+        available branch does not need an API call.
+
+        If the share ID is absent (e.g. the process restarted and lost
+        state mid-copy) the driver conservatively returns 'available' and
+        logs a warning — the operator should verify data completeness.
+
+        :returns: Dict with 'status' key (and 'export_locations' when
+                  status is available).
+        """
+        with self._async_copies_lock:
+            entry = self._async_copies.get(share['id'])
+
+        if entry is None:
+            LOG.warning(
+                "No in-memory copy state for share %s; the process may "
+                "have restarted mid-copy.  Reporting 'available' — verify "
+                "data completeness before use.",
+                share['id'],
+            )
+            return {'status': constants.STATUS_AVAILABLE}
+
+        state = entry.get('status')
+
+        if state == constants.STATUS_AVAILABLE:
+            fs_name = entry.get(
+                'fs_name', self._share_name(share['id']))
+            fs_uid = entry.get('fs_uid', '')
+            share_proto = share['share_proto'].upper()
+            export_locations = self._build_export_locations(
+                share, fs_name, fs_uid, share_proto)
+            return {
+                'status': constants.STATUS_AVAILABLE,
+                'export_locations': export_locations,
+            }
+        elif state == constants.STATUS_ERROR:
+            return {'status': constants.STATUS_ERROR}
+        elif state == constants.STATUS_CREATING_FROM_SNAPSHOT:
+            return {'status': constants.STATUS_CREATING_FROM_SNAPSHOT}
+        else:
+            return {'status': state}
+
     def delete_share(self, context, share, share_server=None):
         """Delete a share's underlying Weka filesystem.
 
         Idempotent: if the filesystem does not exist, returns silently.
         """
         fs_name = self._share_name(share['id'])
-        LOG.info("Deleting share %s (Weka FS '%s')", share['id'], fs_name)
+        LOG.debug(
+            "Deleting share %s (Weka FS '%s')", share['id'], fs_name)
 
         fs = self._client.get_filesystem_by_name(fs_name)
         if not fs:
@@ -643,13 +773,57 @@ class WekaShareDriver(driver.ShareDriver):
             "Shrinking share %s to %s GiB", share['id'], new_size)
         self._client.update_filesystem(fs_uid, total_capacity=new_bytes)
 
-    def ensure_share(self, context, share, share_server=None):
+    def get_backend_info(self, context):
+        """Return stable backend identifiers used by ensure_shares."""
+        return {
+            'weka_api_server': (
+                self.configuration.safe_get('weka_api_server')),
+            'weka_mount_point_base': (
+                self.configuration.safe_get('weka_mount_point_base')),
+        }
+
+    def ensure_shares(self, context, shares):
+        """Verify shares are exported; return per-share update dicts.
+
+        Called by Manila on restart/recovery to re-verify all shares.
+        Issues a single list_filesystems() call to avoid N per-share
+        API round-trips, then resolves each share from the cached dict.
+        A share whose filesystem cannot be found is reported as
+        STATUS_ERROR.
+        """
+        try:
+            all_fs = self._client.list_filesystems() or []
+        except Exception as exc:
+            LOG.warning(
+                "Failed to list filesystems during ensure_shares: %s",
+                exc)
+            all_fs = []
+        fs_by_name = {fs['name']: fs for fs in all_fs}
+
+        updates = {}
+        for share in shares:
+            try:
+                export_locations = self._ensure_share(
+                    context, share, fs_by_name=fs_by_name)
+                updates[share['id']] = {
+                    'export_locations': export_locations}
+            except exception.ShareNotFound:
+                updates[share['id']] = {
+                    'status': constants.STATUS_ERROR}
+        return updates
+
+    def _ensure_share(self, context, share, share_server=None,
+                      fs_by_name=None):
         """Verify share is exported and return current export locations.
 
-        Called by Manila on restart/recovery to re-verify shares.
+        :param fs_by_name: Optional pre-fetched {name: fs} dict from
+            ensure_shares to avoid a per-share API call.
         """
         fs_name = self._share_name(share['id'])
-        fs = self._client.get_filesystem_by_name(fs_name)
+        if fs_by_name is not None:
+            fs = fs_by_name.get(fs_name)
+        else:
+            fs = self._client.get_filesystem_by_name(fs_name)
         if not fs:
             raise exception.ShareNotFound(share_id=share['id'])
 
@@ -668,7 +842,8 @@ class WekaShareDriver(driver.ShareDriver):
                 backends=self._get_backends(),
                 fs_name=fs_name,
                 mount_point=mount_point,
-                num_cores=self.configuration.safe_get('weka_num_cores') or 1,
+                num_cores=(
+                    self.configuration.safe_get('weka_num_cores') or 1),
                 net=self.configuration.safe_get('weka_net_device'),
             )
             mnt.mount()
@@ -728,6 +903,19 @@ class WekaShareDriver(driver.ShareDriver):
                 )
                 rule_state_map[rule['access_id']] = {'state': 'error'}
                 continue
+            if _is_ipv6(rule['access_to']):
+                LOG.warning(
+                    "IPv6 access rule %s rejected; Weka driver "
+                    "supports IPv4 only.",
+                    rule['access_id'],
+                )
+                rule_state_map[rule['access_id']] = {'state': 'error'}
+                raise exception.InvalidShareAccess(
+                    reason=_(
+                        'Weka driver supports IPv4 access rules only; '
+                        'IPv6 address "%s" is not supported.'
+                    ) % rule['access_to']
+                )
             try:
                 self._apply_nfs_rule(share, fs_name, rule)
                 rule_state_map[rule['access_id']] = {'state': 'active'}
@@ -764,7 +952,15 @@ class WekaShareDriver(driver.ShareDriver):
             else 'RO')
         cg_name = 'manila-{}-{}'.format(
             share['id'][:8], rule['access_id'][:8])
-        weka_ip = _cidr_to_weka_ip(rule['access_to'])
+        try:
+            weka_ip = _cidr_to_weka_ip(rule['access_to'])
+        except ValueError:
+            raise exception.InvalidShareAccess(
+                reason=_(
+                    'Weka driver supports IPv4 access rules only; '
+                    '"%s" is not a valid IPv4 address or network.'
+                ) % rule['access_to']
+            )
 
         # Get-or-create the client group so re-applying an existing rule
         # neither hits a duplicate-name error nor leaks a new group.
@@ -840,9 +1036,10 @@ class WekaShareDriver(driver.ShareDriver):
         """Handle WekaFS access rules.
 
         Access control for the WekaFS (POSIX client) protocol is managed
-        entirely within the Weka cluster via filesystem-level authentication
-        and mount tokens.  The Manila access-rules API has no mapping onto
-        those mechanisms in the current driver implementation.
+        entirely within the Weka cluster via filesystem-level
+        authentication and mount tokens.  The Manila access-rules API
+        has no mapping onto those mechanisms in the current driver
+        implementation.
 
         All rules are accepted as a no-op so that the Manila access rule
         workflow completes normally.
@@ -852,7 +1049,8 @@ class WekaShareDriver(driver.ShareDriver):
             LOG.info(
                 "WekaFS shares do not enforce Manila access rules "
                 "(type=%s, rule=%s). Access control for WEKAFS shares is "
-                "managed via Weka filesystem authentication and mount tokens.",
+                "managed via Weka filesystem authentication and mount "
+                "tokens.",
                 rule['access_type'], rule['access_id'],
             )
             rule_state_map[rule['access_id']] = {'state': 'active'}
@@ -923,16 +1121,8 @@ class WekaShareDriver(driver.ShareDriver):
             "Creating snapshot %s (name='%s') for share %s",
             snapshot['id'], snap_name, share['id'],
         )
-        try:
-            self._client.create_snapshot(
-                fs_uid, name=snap_name, is_writable=False)
-        except weka_exc.WekaApiError as exc:
-            if not _is_already_exists_error(exc):
-                raise
-            LOG.info(
-                "Snapshot %s already exists for share %s — treating as "
-                "created", snap_name, share['id'],
-            )
+        self._client.create_snapshot(
+            fs_uid, name=snap_name, is_writable=False)
 
     def delete_snapshot(self, context, snapshot, share_server=None):
         """Delete a snapshot.
@@ -974,7 +1164,7 @@ class WekaShareDriver(driver.ShareDriver):
 
         snap = self._client.get_snapshot_by_name(snap_name, fs_uid=fs_uid)
         if not snap:
-            raise exception.SnapshotNotFound(snapshot_id=snapshot['id'])
+            raise exception.ShareSnapshotNotFound(snapshot_id=snapshot['id'])
 
         LOG.info(
             "Reverting share %s to snapshot %s",
@@ -1003,23 +1193,29 @@ class WekaShareDriver(driver.ShareDriver):
         group_name = (
             self.configuration.safe_get('weka_filesystem_group') or 'default')
 
+        reserved_pct = (
+            self.configuration.safe_get('reserved_percentage') or 0)
+        max_over_sub = (
+            self.configuration.safe_get('max_over_subscription_ratio') or 1.0)
+
         stats = {
             'share_backend_name': backend_name,
             'vendor_name': 'Weka',
             'driver_version': DRIVER_VERSION,
             # Report as an underscore-joined string (e.g. "WEKAFS_NFS") so
-            # the scheduler CapabilitiesFilter exact-matches the value against
-            # a share type's storage_protocol extra-spec (operators set
-            # capability_storage_protocol to the same value), and so
+            # the scheduler CapabilitiesFilter exact-matches the value
+            # against a share type's storage_protocol extra-spec, and so
             # manila-tempest-plugin's ShareMultiBackendTest (which calls
             # storage_protocol.lower().split('_')) works — a Python list
             # would raise AttributeError on .lower().
             'storage_protocol': '_'.join(_SUPPORTED_PROTOCOLS),
             'total_capacity_gb': weka_utils.bytes_to_gb(total_bytes),
             'free_capacity_gb': weka_utils.bytes_to_gb(free_bytes),
-            'reserved_percentage': 0,
+            'reserved_percentage': reserved_pct,
+            'max_over_subscription_ratio': max_over_sub,
             'reserved_snapshot_percentage': 0,
             'snapshot_support': True,
+            # WEKAFS copy always works; NFS fails fast when unconfigured.
             'create_share_from_snapshot_support': True,
             'revert_to_snapshot_support': True,
             'mount_snapshot_support': False,
@@ -1029,7 +1225,7 @@ class WekaShareDriver(driver.ShareDriver):
                 'pool_name': group_name,
                 'total_capacity_gb': weka_utils.bytes_to_gb(total_bytes),
                 'free_capacity_gb': weka_utils.bytes_to_gb(free_bytes),
-                'reserved_percentage': 0,
+                'reserved_percentage': reserved_pct,
                 'reserved_snapshot_percentage': 0,
                 'reserved_share_extend_percentage': 0,
             }],
@@ -1043,8 +1239,11 @@ class WekaShareDriver(driver.ShareDriver):
     def manage_existing(self, share, driver_options):
         """Bring an existing Weka filesystem under Manila management.
 
-        :param share: Share model (share['export_locations'] holds the path).
-        :param driver_options: Dict of driver-specific options (unused).
+        Clears any pre-existing NFS permissions so Manila becomes the
+        sole source of truth for access control.
+
+        :param share: Share model (share['export_locations'] holds path).
+        :param driver_options: Driver-specific options (unused).
         :returns: Dict with 'size' key (GiB) for Manila to record.
         :raises ManageInvalidShare: if the filesystem cannot be found.
         """
@@ -1055,14 +1254,16 @@ class WekaShareDriver(driver.ShareDriver):
         for loc in share.get('export_locations', []):
             path = loc.get('path', '')
             if path:
-                fs_name = path.rsplit('/', 1)[-1] if '/' in path else path
+                fs_name = (path.rsplit('/', 1)[-1]
+                           if '/' in path else path)
                 break
 
         if not fs_name:
             raise exception.ManageInvalidShare(
-                reason=_('Cannot determine filesystem name from share export '
-                         'location. Pass the filesystem name as the export '
-                         'path to manila manage.'))
+                reason=_(
+                    'Cannot determine filesystem name from share export '
+                    'location. Pass the filesystem name as the export '
+                    'path to manila manage.'))
 
         fs = self._client.get_filesystem_by_name(fs_name)
         if not fs:
@@ -1070,21 +1271,34 @@ class WekaShareDriver(driver.ShareDriver):
                 reason=_(
                     'Weka filesystem "%s" not found') % fs_name)
 
-        size_bytes = fs.get('total_budget', fs.get('totalCapacity', 0)) or 0
+        size_bytes = (
+            fs.get('total_budget', fs.get('totalCapacity', 0)) or 0)
         size_gb = max(1, int(weka_utils.bytes_to_gb(size_bytes)))
         fs_uid = fs.get('uid') or fs.get('id', '')
 
-        LOG.info(
-            "Managing existing share %s (FS '%s', size %s GiB)",
-            share['id'], fs_name, size_gb,
-        )
         share_proto = share.get('share_proto', _WEKAFS_PROTO).upper()
         export_locations = self._build_export_locations(
             share, fs_name, fs_uid, share_proto)
+
+        # Clear pre-existing NFS permissions so Manila owns access ctrl.
+        LOG.debug(
+            "Clearing pre-existing NFS permissions for managed "
+            "filesystem '%s'", fs_name)
+        try:
+            self._remove_all_nfs_permissions(fs_name)
+        except Exception as exc:
+            LOG.warning(
+                "Failed to clear NFS permissions for '%s': %s",
+                fs_name, exc)
+
+        LOG.info(
+            "Managed existing share %s (FS '%s', size %s GiB)",
+            share['id'], fs_name, size_gb,
+        )
         return {'size': size_gb, 'export_locations': export_locations}
 
     def unmanage(self, share):
-        """Remove share from Manila management without deleting the filesystem.
+        """Remove share from Manila management without deleting filesystem.
 
         This is a no-op: Manila simply stops tracking the share.
         The underlying Weka filesystem is left intact.
@@ -1127,7 +1341,7 @@ class WekaShareDriver(driver.ShareDriver):
         """Return the Weka snapshot name for a Manila snapshot ID.
 
         Weka enforces a 32-character maximum on snapshot names.
-        Uses 's_' prefix (2 chars) + first 30 hex chars of the UUID = 32 chars.
+        Uses 's_' prefix (2 chars) + first 30 hex chars of UUID = 32.
         """
         id_hex = snapshot_id.replace('-', '')
         return 's_' + id_hex[:30]
@@ -1159,7 +1373,8 @@ class WekaShareDriver(driver.ShareDriver):
                 else:
                     # Manila ORM object — iterate key/value pairs
                     uid = next(
-                        (v for k, v in meta.items() if k == 'weka_fs_uid'),
+                        (v for k, v in meta.items()
+                         if k == 'weka_fs_uid'),
                         None)
                 if uid:
                     return uid
@@ -1172,17 +1387,19 @@ class WekaShareDriver(driver.ShareDriver):
         if fs:
             return fs['uid']
 
-        # For managed shares the filesystem keeps its original name, which is
-        # the last path component of the export location path.
+        # For managed shares the filesystem keeps its original name,
+        # which is the last path component of the export location path.
         for loc in share.get('export_locations', []) or []:
             path = ''
             try:
-                path = loc.get('path', '') if isinstance(loc, dict) else str(
-                    getattr(loc, 'path', ''))
+                path = (loc.get('path', '')
+                        if isinstance(loc, dict)
+                        else str(getattr(loc, 'path', '')))
             except (AttributeError, TypeError):
                 pass
             if path:
-                candidate = path.rsplit('/', 1)[-1] if '/' in path else path
+                candidate = (path.rsplit('/', 1)[-1]
+                             if '/' in path else path)
                 # Strip NFS server prefix (server:/fs_name → fs_name)
                 if ':' in candidate:
                     candidate = candidate.split(':', 1)[-1].lstrip('/')
@@ -1208,8 +1425,9 @@ class WekaShareDriver(driver.ShareDriver):
             grp = self._client.create_filesystem_group(group_name)
             self._fs_group_uid = grp['uid']
 
-    def _create_filesystem_idempotent(self, fs_name, group_name, size_bytes):
-        """Create a filesystem, returning existing one if already present."""
+    def _create_filesystem_idempotent(self, fs_name, group_name,
+                                      size_bytes):
+        """Create a filesystem; return existing one if already present."""
         existing = self._client.get_filesystem_by_name(fs_name)
         if existing:
             LOG.debug(
@@ -1244,8 +1462,8 @@ class WekaShareDriver(driver.ShareDriver):
             path = '{backends}/{fs_name}'.format(
                 backends=backends, fs_name=fs_name)
         else:
-            # NFS: use dedicated NFS server if configured, else fall back to
-            # the API server address.
+            # NFS: use dedicated NFS server if configured, else fall
+            # back to the API server address.
             nfs_server = (
                 self.configuration.safe_get('weka_nfs_server') or backends)
             path = '{server}:/{fs_name}'.format(

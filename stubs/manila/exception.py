@@ -53,6 +53,14 @@ class SnapshotNotFound(ManilaException):
         super(SnapshotNotFound, self).__init__(**kwargs)
 
 
+class ShareSnapshotNotFound(ManilaException):
+    message = "Snapshot %(snapshot_id)s could not be found."
+
+    def __init__(self, snapshot_id=None, **kwargs):
+        kwargs['snapshot_id'] = snapshot_id or 'unknown'
+        super(ShareSnapshotNotFound, self).__init__(**kwargs)
+
+
 class ManageInvalidShare(ManilaException):
     message = "Manage existing share failed: %(reason)s"
 
@@ -64,3 +72,7 @@ class ManageExistingShareTypeMismatch(ManilaException):
 
 class UnmanageInvalidShare(ManilaException):
     message = "Unmanage share failed: %(reason)s"
+
+
+class ShareBackendException(ManilaException):
+    message = "Share backend error: %(msg)s"

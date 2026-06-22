@@ -7,6 +7,7 @@ ACCESS_LEVEL_RO = 'ro'
 STATUS_AVAILABLE = 'available'
 STATUS_ERROR = 'error'
 STATUS_CREATING = 'creating'
+STATUS_CREATING_FROM_SNAPSHOT = 'creating_from_snapshot'
 STATUS_DELETING = 'deleting'
 
 SHARE_PROTO_NFS = 'NFS'
