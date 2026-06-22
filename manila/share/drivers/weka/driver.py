@@ -645,8 +645,12 @@ class WekaShareDriver(driver.ShareDriver):
                 except Exception:
                     pass
 
-    def get_share_status(self, context, share, share_server=None):
+    def get_share_status(self, share, share_server=None):
         """Return the current status of an async share creation.
+
+        Signature matches manila's ShareDriver.get_share_status; the
+        manager calls ``get_share_status(share_instance, share_server)``
+        with no context argument.
 
         Reads the in-memory copy-state map updated by _run_snapshot_copy.
         The map stores {'status', 'fs_uid', 'fs_name'} so that the
