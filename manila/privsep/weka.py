@@ -22,7 +22,7 @@ privileged.
 
 Usage::
 
-    from manila.share.drivers.weka import privsep as weka_privsep
+    from manila.privsep import weka as weka_privsep
     weka_privsep.wekafs_mount(source, mount_point, options)
     weka_privsep.umount(mount_point)
     weka_privsep.nfs_mount(export, mount_point)
