@@ -1537,7 +1537,7 @@ class TestWekaShareDriverGetShareStatus(unittest.TestCase):
             'fs_name': fakes.FAKE_FS_NAME,
         }
 
-        result = drv.get_share_status(context=None, share=share)
+        result = drv.get_share_status(share)
 
         self.assertEqual(
             constants.STATUS_CREATING_FROM_SNAPSHOT,
@@ -1553,7 +1553,7 @@ class TestWekaShareDriverGetShareStatus(unittest.TestCase):
         }
         # No API call expected — fs_uid/fs_name come from the dict.
 
-        result = drv.get_share_status(context=None, share=share)
+        result = drv.get_share_status(share)
 
         self.assertEqual(constants.STATUS_AVAILABLE, result['status'])
         self.assertIn('export_locations', result)
@@ -1568,7 +1568,7 @@ class TestWekaShareDriverGetShareStatus(unittest.TestCase):
             'fs_name': fakes.FAKE_FS_NAME,
         }
 
-        result = drv.get_share_status(context=None, share=share)
+        result = drv.get_share_status(share)
 
         self.assertEqual(constants.STATUS_ERROR, result['status'])
 
@@ -1578,7 +1578,7 @@ class TestWekaShareDriverGetShareStatus(unittest.TestCase):
         share = fakes.fake_share()
         # _async_copies is empty — simulates process restart
 
-        result = drv.get_share_status(context=None, share=share)
+        result = drv.get_share_status(share)
 
         self.assertEqual(constants.STATUS_AVAILABLE, result['status'])
 
