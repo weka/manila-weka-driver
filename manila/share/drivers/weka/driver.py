@@ -81,7 +81,6 @@ import time
 
 import eventlet
 
-from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import units
@@ -94,6 +93,7 @@ from manila.share.drivers.weka import client as weka_client
 from manila.share.drivers.weka import config as weka_config
 from manila.share.drivers.weka import exceptions as weka_exc
 from manila.share.drivers.weka import posix as weka_posix
+from manila.share.drivers.weka import privsep as weka_privsep
 from manila.share.drivers.weka import utils as weka_utils
 
 LOG = logging.getLogger(__name__)
@@ -469,11 +469,9 @@ class WekaShareDriver(driver.ShareDriver):
         """
         LOG.info("Rsyncing snapshot data from %s to %s",
                  src_snap_dir, dst_mnt)
-        processutils.execute(
-            'rsync', '-a',
+        weka_privsep.rsync(
             src_snap_dir.rstrip('/') + '/',
             dst_mnt.rstrip('/') + '/',
-            run_as_root=True,
         )
 
     def _copy_snapshot_nfs(self, share, snapshot, snap,
@@ -535,19 +533,15 @@ class WekaShareDriver(driver.ShareDriver):
             # Allow the NFS server to apply the new permissions.
             time.sleep(5)
 
-            processutils.execute(
-                'mount', '-t', 'nfs',
+            weka_privsep.nfs_mount(
                 '{}:/{}'.format(nfs_server, src_fs_name),
                 src_mnt,
-                run_as_root=True,
             )
             src_mounted = True
 
-            processutils.execute(
-                'mount', '-t', 'nfs',
+            weka_privsep.nfs_mount(
                 '{}:/{}'.format(nfs_server, new_fs_name),
                 dst_mnt,
-                run_as_root=True,
             )
             dst_mounted = True
 
@@ -562,14 +556,12 @@ class WekaShareDriver(driver.ShareDriver):
         finally:
             if dst_mounted:
                 try:
-                    processutils.execute(
-                        'umount', dst_mnt, run_as_root=True)
+                    weka_privsep.umount(dst_mnt)
                 except Exception as e:
                     LOG.warning("Failed to umount %s: %s", dst_mnt, e)
             if src_mounted:
                 try:
-                    processutils.execute(
-                        'umount', src_mnt, run_as_root=True)
+                    weka_privsep.umount(src_mnt)
                 except Exception as e:
                     LOG.warning("Failed to umount %s: %s", src_mnt, e)
             for mnt in (src_mnt, dst_mnt):
