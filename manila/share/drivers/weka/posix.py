@@ -87,7 +87,8 @@ class WekaMount(object):
     :param sync_on_close: Flush on close (default False).
     :param max_io_size: Override maximum IO size in bytes (optional).
     :param iops_limit: IOPS limit for this mount (optional).
-    :param execute: Callable for shell commands (default: processutils.execute).
+    :param execute: Callable for shell commands (default:
+        processutils.execute).
     """
 
     def __init__(self, backends, fs_name, mount_point,

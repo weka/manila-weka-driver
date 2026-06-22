@@ -14,7 +14,7 @@
 
 """Fake objects and API responses used in Weka driver unit tests."""
 
-import uuid as _uuid_mod
+from oslo_utils import uuidutils
 
 # ---------------------------------------------------------------------------
 # Helper generators
@@ -22,7 +22,7 @@ import uuid as _uuid_mod
 
 
 def _uid():
-    return str(_uuid_mod.uuid4())
+    return uuidutils.generate_uuid()
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +35,8 @@ FAKE_FS_NAME = 'manila_shareuuid1234'
 FAKE_GROUP_UID = 'grp-uid-5678'
 FAKE_GROUP_NAME = 'default'
 FAKE_SNAP_UID = 'snap-uid-abcd'
-# Must match _snapshot_name('snapshot-uuid-0001'): prefix 's_' + hex-stripped ID
+# Must match _snapshot_name('snapshot-uuid-0001'):
+# prefix 's_' + hex-stripped ID
 FAKE_SNAP_NAME = 's_snapshotuuid0001'
 FAKE_ORG_UID = 'org-uid-9999'
 FAKE_PERM_UID = 'perm-uid-aaaa'
@@ -161,7 +162,8 @@ FAKE_SNAPSHOT_ID = 'snapshot-uuid-0001'
 # Used in create_share_from_snapshot tests — the *new* share being created
 # (distinct from the snapshot's parent share so names don't collide).
 # FAKE_NEW_FS_NAME must match _share_name('new-share-uuid-9999'):
-#   prefix 'manila_' + 'new-share-uuid-9999'.replace('-','') → 'manila_newshareuuid9999'
+#   'manila_' + 'new-share-uuid-9999'.replace('-','')
+#   => 'manila_newshareuuid9999'
 FAKE_NEW_SHARE_ID = 'new-share-uuid-9999'
 FAKE_NEW_FS_UID = 'new-fs-uid-9999'
 FAKE_NEW_FS_NAME = 'manila_newshareuuid9999'
@@ -199,7 +201,7 @@ def fake_snapshot_model(snapshot_id=FAKE_SNAPSHOT_ID,
 
 
 def fake_access_rule(rule_id=None, access_type='ip',
-                     access_to='10.0.0.0/24',
+                     access_to='192.0.2.0/24',
                      access_level='rw'):
     return {
         'access_id': rule_id or _uid(),
