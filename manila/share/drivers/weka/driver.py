@@ -1443,6 +1443,18 @@ class WekaShareDriver(driver.ShareDriver):
             if fs:
                 return fs
             raise
+        except weka_exc.WekaCapacityError as e:
+            message = _(
+                "Insufficient capacity in Weka filesystem group "
+                "'%(group)s' to create filesystem '%(fs)s' of "
+                "%(size)s bytes: %(reason)s") % {
+                    'group': group_name,
+                    'fs': fs_name,
+                    'size': size_bytes,
+                    'reason': str(e),
+            }
+            LOG.error(message)
+            raise exception.ShareBackendException(msg=message)
 
     def _build_export_locations(self, share, fs_name, fs_uid, share_proto):
         """Build Manila export location list for a share.
