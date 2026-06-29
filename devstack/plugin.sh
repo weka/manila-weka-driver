@@ -51,6 +51,24 @@ function install_manila_weka_driver {
         echo "WARNING: Manila drivers dir (${MANILA_DRIVERS_DIR}) or driver source (${WEKA_DRIVER_SRC}) not found."
         echo "The driver may not be importable by Manila. Check your installation."
     fi
+
+    # Symlink manila/privsep/weka.py — imported by driver.py and posix.py as
+    # `from manila.privsep import weka as weka_privsep`. Manila provides
+    # privsep/__init__.py itself; we only add the weka module.
+    local WEKA_PRIVSEP_SRC="${MANILA_WEKA_DRIVER_DIR}/manila/privsep/weka.py"
+    local WEKA_PRIVSEP_DEST="${MANILA_DIR}/manila/privsep/weka.py"
+
+    if [ -f "${WEKA_PRIVSEP_SRC}" ] && [ -d "${MANILA_DIR}/manila/privsep" ]; then
+        if [ ! -e "${WEKA_PRIVSEP_DEST}" ]; then
+            ln -sfn "${WEKA_PRIVSEP_SRC}" "${WEKA_PRIVSEP_DEST}"
+            echo "Linked Weka privsep module into Manila source tree: ${WEKA_PRIVSEP_DEST}"
+        else
+            echo "Weka privsep module already present at ${WEKA_PRIVSEP_DEST}"
+        fi
+    else
+        echo "WARNING: Manila privsep dir (${MANILA_DIR}/manila/privsep) or privsep source (${WEKA_PRIVSEP_SRC}) not found."
+        echo "The driver may not be importable by Manila. Check your installation."
+    fi
 }
 
 # ─── Configuration phase ───────────────────────────────────────────────────────
