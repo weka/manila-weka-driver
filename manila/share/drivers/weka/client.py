@@ -38,6 +38,16 @@ from manila.share.drivers.weka import utils
 LOG = logging.getLogger(__name__)
 
 _API_V2 = '/api/v2'
+
+
+def _is_capacity_error(message):
+    """True if a Weka API error message indicates capacity exhaustion."""
+    low = (message or '').lower()
+    return 'capacity' in low and any(
+        kw in low for kw in ('not enough', 'insufficient', 'no space')
+    )
+
+
 # Fallback defaults; overridden by weka_api_timeout and
 # weka_max_api_retries config options wired in via do_setup.
 _DEFAULT_TIMEOUT = 30
@@ -132,6 +142,8 @@ class WekaApiClient(object):
             raise exceptions.WekaConflict(reason=msg)
         elif code == 429:
             raise exceptions.WekaRateLimited(reason=msg)
+        elif code == 400 and _is_capacity_error(msg):
+            raise exceptions.WekaCapacityError(reason=msg)
         else:
             raise exceptions.WekaApiError(status_code=code, reason=msg)
 

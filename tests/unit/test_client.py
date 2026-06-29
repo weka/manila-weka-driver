@@ -83,6 +83,23 @@ class TestWekaApiClientAuth(unittest.TestCase):
             c._raise_for_status(resp)
         self.assertIn('Unavailable', str(ctx.exception))
 
+    def test_raise_for_status_400_capacity_raises_capacity_error(self):
+        c = self._make_client()
+        msg = (
+            'Not enough available drive capacity for filesystem. '
+            'requested "1.07 GB", but only "0 B" are free'
+        )
+        resp = _make_response(400, {'message': msg})
+        self.assertRaises(
+            weka_exc.WekaCapacityError, c._raise_for_status, resp)
+
+    def test_raise_for_status_400_generic_raises_api_error(self):
+        c = self._make_client()
+        resp = _make_response(400, {'message': 'bad request'})
+        with self.assertRaises(weka_exc.WekaApiError) as ctx:
+            c._raise_for_status(resp)
+        self.assertEqual(400, ctx.exception.status_code)
+
     def test_refresh_falls_back_to_login_when_refresh_token_missing(self):
         c = self._make_client()
         c._access_token = 'old-tok'

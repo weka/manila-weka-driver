@@ -184,6 +184,17 @@ class TestWekaShareDriverCreateShare(unittest.TestCase):
         meta = result[0].get('metadata', {})
         self.assertEqual(fakes.FAKE_FS_UID, meta.get('weka_fs_uid'))
 
+    def test_create_share_raises_share_backend_on_capacity(self):
+        drv = self._make_driver()
+        drv._client.get_filesystem_by_name.return_value = None
+        drv._client.create_filesystem.side_effect = (
+            weka_exc.WekaCapacityError(reason='no space')
+        )
+        share = fakes.fake_share(proto='WEKAFS')
+        self.assertRaises(
+            exception.ShareBackendException,
+            drv.create_share, None, share)
+
 
 _PATCH_NFS_MOUNT = (
     'manila.share.drivers.weka.driver.weka_privsep.nfs_mount')
