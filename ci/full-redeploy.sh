@@ -102,9 +102,22 @@ else
     git reset --hard origin/master
 fi
 
+# Refresh local.conf.template from the persisted repo clone BEFORE generating
+# local.conf. The post-stack CI-script refresh below also copies it, but that
+# runs too late for this run's local.conf — without this each run would use the
+# PREVIOUS run's template (one run stale), which once re-introduced a removed
+# secret line. The clone survives teardown (only manila/tempest/data are rm'd).
+WEKA_REPO="/opt/stack/manila-weka-driver"
+if [ -f "${WEKA_REPO}/ci/local.conf.template" ]; then
+    cp "${WEKA_REPO}/ci/local.conf.template" "${CI_DIR}/local.conf.template"
+fi
+
 # Install local.conf from template, substituting environment variables
 export CI_HOST_IP="$(hostname -I | awk '{print $1}')"
-envsubst '$CI_HOST_IP $CI_VM_IP $WEKA_API_SERVER $WEKA_API_PORT $WEKA_USERNAME $WEKA_PASSWORD $WEKA_ORGANIZATION' < "${CI_DIR}/local.conf.template" > "${DEVSTACK_DIR}/local.conf"
+# WEKA_PASSWORD is deliberately excluded: it must never be substituted into
+# local.conf (which DevStack echoes via `set -x` into stack.sh.log). It is set
+# directly in manila.conf post-stack, untraced (see below).
+envsubst '$CI_HOST_IP $CI_VM_IP $WEKA_API_SERVER $WEKA_API_PORT $WEKA_USERNAME $WEKA_ORGANIZATION' < "${CI_DIR}/local.conf.template" > "${DEVSTACK_DIR}/local.conf"
 
 cd "$DEVSTACK_DIR"
 # 9>&- closes the inherited lock fd so stack.sh's async children
@@ -223,6 +236,21 @@ iniset /etc/manila/manila.conf manila_sys_admin helper_command \
     "sudo ${PRIVSEP_HELPER} --config-file /etc/manila/manila.conf"
 set -u
 
+# ── Set the Weka credential (untraced, kept out of every log) ─────────────────
+# weka_password is NOT in local.conf's [[post-config]] block on purpose: DevStack
+# applies that block with `iniset` under `set -x`, echoing the value into the
+# published stack.sh.log. Set it directly in manila.conf here with command-echo
+# disabled, so the secret is never written to a log while still reaching the
+# driver. This script runs without `set -x`; `{ set +x; }` guards against a
+# `bash -x` invocation too.
+log "Setting Weka credential in manila.conf (untraced)"
+set +u
+source "${DEVSTACK_DIR}/functions"
+{ set +x; } 2>/dev/null
+iniset /etc/manila/manila.conf weka_nfs    weka_password "$WEKA_PASSWORD"
+iniset /etc/manila/manila.conf weka_wekafs weka_password "$WEKA_PASSWORD"
+set -u
+
 # ── Point manila at the live Weka NFS gateway ─────────────────────────────────
 # The CI host is a Weka client, so discover the UP nfs-gateway container's IP.
 # ganesha listens on 0.0.0.0:2049 there; mountable once its host firewall is
@@ -237,7 +265,7 @@ except Exception:
 print(next((c["ips"][0] for c in d
             if "nfs-gateway" in (c.get("hostname") or "")
             and c.get("status") == "UP" and c.get("ips")), ""))
-' 2>/dev/null)
+' 2>/dev/null || true)
 if [ -n "$GW_IP" ]; then
     log "Weka NFS gateway discovered at $GW_IP; setting weka_nfs_server"
     set +u
@@ -245,15 +273,20 @@ if [ -n "$GW_IP" ]; then
     iniset /etc/manila/manila.conf weka_nfs weka_nfs_server "$GW_IP"
     iniset /etc/manila/manila.conf weka_wekafs weka_nfs_server "$GW_IP"
     set -u
-    sudo systemctl restart devstack@m-shr 2>&1 || true
 else
     log "WARNING: no UP Weka NFS gateway found; weka_nfs_server left as-is (create_share_from_snapshot will fail)"
 fi
 
-# Verify
-openstack share service list
-openstack share type list
-openstack share pool list --detail
+# Restart manila-share unconditionally so the post-stack weka_password (and
+# weka_nfs_server, when discovered) take effect. Since weka_password is now set
+# here rather than in local.conf, the backend can only authenticate after this
+# restart — it must NOT depend on gateway discovery (which is best-effort).
+sudo systemctl restart devstack@m-shr 2>&1 || true
+
+# Verify (informational; never fail the redeploy on a query hiccup)
+openstack share service list || true
+openstack share type list || true
+openstack share pool list --detail || true
 
 # ── Restart the listener ──────────────────────────────────────────────────────
 
