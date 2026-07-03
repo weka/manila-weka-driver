@@ -207,7 +207,7 @@ _PATCH_MKDTEMP = 'manila.share.drivers.weka.driver.tempfile.mkdtemp'
 _PATCH_RMDIR = 'manila.share.drivers.weka.driver.os.rmdir'
 _PATCH_SOCKET = 'manila.share.drivers.weka.driver.socket.socket'
 _PATCH_SLEEP = 'manila.share.drivers.weka.driver.time.sleep'
-_PATCH_SPAWN = 'manila.share.drivers.weka.driver.eventlet.spawn'
+_PATCH_THREAD = 'manila.share.drivers.weka.driver.threading.Thread'
 
 
 class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
@@ -298,9 +298,9 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
 
     # ── Async dispatch ────────────────────────────────────────────────────
 
-    @mock.patch(_PATCH_SPAWN)
+    @mock.patch(_PATCH_THREAD)
     def test_create_from_snapshot_returns_creating_status(
-            self, mock_spawn):
+            self, mock_thread):
         """create_share_from_snapshot returns dict with creating status."""
         drv = self._make_driver()
         snap, new_fs, _ = self._setup_happy_path_client(drv)
@@ -314,7 +314,7 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
             result['status'])
         self.assertIn('export_locations', result)
         self.assertGreater(len(result['export_locations']), 0)
-        mock_spawn.assert_called_once()
+        mock_thread.assert_called_once()
 
     # ── Happy path copy logic ─────────────────────────────────────────────
 
@@ -390,7 +390,7 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
             '192.0.2.1', 0)
         mock_mkdtemp.side_effect = ['/tmp/snap_src', '/tmp/snap_dst']
 
-        with mock.patch(_PATCH_SPAWN):
+        with mock.patch(_PATCH_THREAD):
             result = drv.create_share_from_snapshot(
                 None, self._new_share(proto='NFS'),
                 fakes.fake_snapshot_model())
@@ -1596,14 +1596,14 @@ class TestWekaShareDriverGetShareStatus(unittest.TestCase):
         self.assertEqual(constants.STATUS_ERROR, result['status'])
 
     def test_get_share_status_missing_key(self):
-        """Key absent (process restart): return available with warning."""
+        """Key absent (process restart): return error so user can retry."""
         drv = self._make_driver()
         share = fakes.fake_share()
         # _async_copies is empty — simulates process restart
 
         result = drv.get_share_status(share)
 
-        self.assertEqual(constants.STATUS_AVAILABLE, result['status'])
+        self.assertEqual(constants.STATUS_ERROR, result['status'])
 
 
 class TestWekaShareDriverEnsureShares(unittest.TestCase):

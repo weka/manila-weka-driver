@@ -7,4 +7,3 @@ mock>=5.0.0
 requests-mock>=1.11.0
 oslotest>=4.0.0
 testtools>=2.5.0
-eventlet>=0.33.0
