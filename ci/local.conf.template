@@ -63,7 +63,10 @@ weka_api_server = ${WEKA_API_SERVER}
 weka_api_port = ${WEKA_API_PORT}
 weka_ssl_verify = false
 weka_username = ${WEKA_USERNAME}
-weka_password = ${WEKA_PASSWORD}
+# weka_password is intentionally NOT set here. DevStack applies this
+# [[post-config]] block with `iniset` under `set -x`, which would echo the
+# value into the published stack.sh.log. It is set post-stack (untraced) in
+# full-redeploy.sh instead.
 weka_organization = ${WEKA_ORGANIZATION}
 weka_filesystem_group = default
 weka_share_name_prefix = ci_nfs_
@@ -84,7 +87,10 @@ weka_api_server = ${WEKA_API_SERVER}
 weka_api_port = ${WEKA_API_PORT}
 weka_ssl_verify = false
 weka_username = ${WEKA_USERNAME}
-weka_password = ${WEKA_PASSWORD}
+# weka_password is intentionally NOT set here. DevStack applies this
+# [[post-config]] block with `iniset` under `set -x`, which would echo the
+# value into the published stack.sh.log. It is set post-stack (untraced) in
+# full-redeploy.sh instead.
 weka_organization = ${WEKA_ORGANIZATION}
 weka_filesystem_group = default
 weka_share_name_prefix = ci_wfs_

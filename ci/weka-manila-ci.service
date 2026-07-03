@@ -15,6 +15,10 @@ StandardError=journal
 SyslogIdentifier=weka-manila-ci
 Environment=HOME=/home/stack
 Environment=GERRIT_USER=Assaf
+# Load CI_VM_IP (public IP for log URLs), Weka creds, GERRIT_TOKEN, etc. so
+# per-comment runs (ci-runner -> post-results) post the reachable public log
+# URL instead of falling back to `hostname -I` (the VM's private IP).
+EnvironmentFile=/opt/weka-ci/ci-env
 
 [Install]
 WantedBy=multi-user.target
