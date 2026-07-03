@@ -29,8 +29,9 @@ Usage::
     weka_privsep.rsync(src, dst)
 """
 
-import manila.privsep
 from oslo_concurrency import processutils
+
+import manila.privsep
 
 
 @manila.privsep.sys_admin_pctxt.entrypoint

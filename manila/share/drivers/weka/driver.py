@@ -65,11 +65,12 @@ Critical implementation notes
 Known limitations
 -----------------
   - create_share_from_snapshot runs the data copy in a background
-    eventlet greenlet.  If the manila-share process restarts mid-copy
-    the in-memory status is lost; get_share_status will conservatively
-    return 'available' in that case.  The NFS copy path requires
-    weka_nfs_server to be configured; an unconfigured NFS share raises
-    ShareBackendException before filesystem creation begins.
+    thread.  If the manila-share process restarts mid-copy the
+    in-memory status is lost; get_share_status returns 'error' so the
+    user can delete the share and retry the clone.  The NFS copy path
+    requires weka_nfs_server to be configured; an unconfigured NFS
+    share raises ShareBackendException before filesystem creation
+    begins.
 """
 
 import ipaddress
@@ -78,8 +79,6 @@ import socket
 import tempfile
 import threading
 import time
-
-import eventlet
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -413,10 +412,13 @@ class WekaShareDriver(driver.ShareDriver):
             share['id'], snapshot['id'], src_fs_name, snap_name, share_proto,
         )
 
-        eventlet.spawn(
-            self._run_snapshot_copy,
-            share, snapshot, snap, src_fs_name, new_fs_name, share_proto,
+        copy_thread = threading.Thread(
+            target=self._run_snapshot_copy,
+            args=(share, snapshot, snap, src_fs_name, new_fs_name,
+                  share_proto),
         )
+        copy_thread.daemon = True
+        copy_thread.start()
 
         return {
             'status': constants.STATUS_CREATING_FROM_SNAPSHOT,
@@ -649,8 +651,8 @@ class WekaShareDriver(driver.ShareDriver):
         available branch does not need an API call.
 
         If the share ID is absent (e.g. the process restarted and lost
-        state mid-copy) the driver conservatively returns 'available' and
-        logs a warning — the operator should verify data completeness.
+        state mid-copy) the driver returns 'error' so the operator can
+        delete the share and re-attempt the clone.
 
         :returns: Dict with 'status' key (and 'export_locations' when
                   status is available).
@@ -661,11 +663,11 @@ class WekaShareDriver(driver.ShareDriver):
         if entry is None:
             LOG.warning(
                 "No in-memory copy state for share %s; the process may "
-                "have restarted mid-copy.  Reporting 'available' — verify "
-                "data completeness before use.",
+                "have restarted mid-copy.  Reporting 'error' so the "
+                "share can be deleted and the clone re-attempted.",
                 share['id'],
             )
-            return {'status': constants.STATUS_AVAILABLE}
+            return {'status': constants.STATUS_ERROR}
 
         state = entry.get('status')
 
