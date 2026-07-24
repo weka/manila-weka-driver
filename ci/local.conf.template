@@ -74,6 +74,10 @@ weka_mount_point_base = /mnt/weka/nfs
 # NFS server the driver mounts from to copy snapshot data
 # (create_share_from_snapshot). Same host as the API in this CI.
 weka_nfs_server = ${WEKA_API_SERVER}
+# WEKAFS per-tenant isolation is always on, so weka_org_admin_secret is
+# mandatory for the driver to start (even on this NFS backend). Like
+# weka_password it is a secret, so it is applied post-stack (untraced)
+# in full-redeploy.sh rather than here, to keep it out of stack.sh.log.
 
 # ── WEKAFS backend ───────────────────────────────────────
 [weka_wekafs]
@@ -95,6 +99,10 @@ weka_organization = ${WEKA_ORGANIZATION}
 weka_filesystem_group = default
 weka_share_name_prefix = ci_wfs_
 weka_mount_point_base = /mnt/weka/wekafs
+# weka_org_admin_secret is required (WEKAFS isolation is always on) and
+# is set post-stack in full-redeploy.sh alongside weka_password. Tempest
+# exercises the WEKAFS control-plane API only (no kernel mount), so no
+# per-client token distribution is needed in CI.
 
 [[post-config|$TEMPEST_CONFIG]]
 [service_available]

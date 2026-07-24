@@ -87,13 +87,29 @@ def fake_new_filesystem():
     return fake_filesystem(uid=FAKE_NEW_FS_UID, name=FAKE_NEW_FS_NAME)
 
 
-def fake_organization(uid=FAKE_ORG_UID, name='TestOrg',
-                      ssd_quota=None, total_quota=None):
+def fake_organization(uid=FAKE_ORG_UID, name='TestOrg', org_id=1,
+                      ssd_quota=0, total_quota=0,
+                      enforce_fs_auth=False):
+    # Matches the live Weka v2 shape (snake_case, includes 'id').
     return {
         'uid': uid,
+        'id': org_id,
         'name': name,
-        'ssdQuota': ssd_quota,
-        'totalQuota': total_quota,
+        'ssd_quota': ssd_quota,
+        'total_quota': total_quota,
+        'enforce_fs_auth': enforce_fs_auth,
+    }
+
+
+def fake_user(username='manila', role='TenantAdmin', org_name='TestOrg',
+              org_id=1, uid=None):
+    return {
+        'uid': uid or _uid(),
+        'username': username,
+        'role': role,
+        'org_name': org_name,
+        'org_id': org_id,
+        'source': 'Internal',
     }
 
 
@@ -158,6 +174,7 @@ def fake_quota(inode_id=12345, hard_limit=10 * 1024 ** 3,
 
 FAKE_SHARE_ID = 'share-uuid-1234'
 FAKE_SNAPSHOT_ID = 'snapshot-uuid-0001'
+FAKE_PROJECT_ID = 'proj-uuid-5678'
 
 # Used in create_share_from_snapshot tests — the *new* share being created
 # (distinct from the snapshot's parent share so names don't collide).
@@ -171,7 +188,7 @@ FAKE_CG_RULE_UID = 'rule-uid-cccc'
 
 
 def fake_share(share_id=FAKE_SHARE_ID, size=10, proto='WEKAFS',
-               export_locations=None):
+               export_locations=None, project_id=FAKE_PROJECT_ID):
     if export_locations is None:
         export_locations = [{
             'path': 'weka-host/{}'.format('manila_' + share_id),
@@ -187,6 +204,7 @@ def fake_share(share_id=FAKE_SHARE_ID, size=10, proto='WEKAFS',
         'share_proto': proto,
         'export_locations': export_locations,
         'display_name': 'test-share',
+        'project_id': project_id,
     }
 
 

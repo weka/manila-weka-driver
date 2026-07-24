@@ -129,9 +129,119 @@ weka_password     = dev-password
 weka_share_name_prefix = manila_dev_
 ```
 
-## Multi-Tenancy (Weka Organizations)
+## Per-Tenant WEKAFS Isolation
 
-Each Weka organization can be a separate Manila backend:
+### How it works
+
+The driver always maps each Manila project to its own Weka organization
+(tenant).  WEKAFS filesystems are created inside that org with
+`auth_required=True`, so only a client holding a token scoped to that
+org can mount them — enforced by the Weka cluster itself.  This
+behavior is mandatory and requires a Weka cluster with multi-tenant
+organization support (5.x REST v2).
+
+NFS shares are unaffected.
+
+On first use of a project, the driver calls `POST /organizations` to
+create the Weka org and its admin user in one API call.  All subsequent
+filesystem operations for that project (create, delete, extend, shrink)
+use an org-scoped session logged in as the per-org admin, because Weka
+binds filesystem operations to the authenticated session's org.
+
+The per-org admin password is derived deterministically:
+`HMAC-SHA256(weka_org_admin_secret, project_id)`.  No per-tenant
+secret is stored on disk.
+
+The Weka org is **retained** when the project's last share is deleted;
+it is not torn down automatically.
+
+### Two principals per org
+
+The driver creates **two** Weka users inside each per-project org:
+
+1. **TenantAdmin** (`weka_org_user`, e.g. `manila`) — used internally
+   for all filesystem operations; its password is
+   `HMAC-SHA256(weka_org_admin_secret, project_id)`.  Never exposed to
+   tenants.
+2. **Regular mount user** (`weka_org_user + "-mnt"`, e.g. `manila-mnt`)
+   — least-privilege account for tenant mounts; its password is
+   `HMAC-SHA256(weka_org_admin_secret, project_id + ":mount")`.
+
+> **Note:** the stored password is not the raw HMAC hex digest — the
+> driver formats the digest to satisfy Weka's password-complexity rules.
+> The mount-user password is delivered to tenants via the access_key
+> (below), so it rarely needs to be recomputed by hand.
+
+### Self-service credential delivery via access_key
+
+When a tenant creates a Manila access rule on a WEKAFS share, the driver
+ensures the Regular mount user exists and returns its password as the
+rule's **access_key** (Manila's `access_key` column, String(255)).
+
+The tenant retrieves the credential with standard OpenStack tooling —
+no operator intervention required:
+
+```bash
+openstack share create WEKAFS 100 --name myshare --share-type weka
+openstack share access create myshare user weka
+KEY=$(openstack share access list myshare \
+        -f value -c "Access Key" | head -1)
+```
+
+The `KEY` value is the mount user's password.  Use it to log in and
+mount:
+
+```bash
+# Log in to the per-project Weka org (writes ~/.weka/auth-token.json)
+weka user login manila-mnt "$KEY" \
+    --org <weka_org_name> -H <api-host>
+
+# Mount the share
+mount -t wekafs \
+    -o auth_token_path=~/.weka/auth-token.json \
+    <backend>/<fs_name> <mountpoint>
+```
+
+The access rule is still a no-op for **enforcement** (enforcement is at
+the org boundary); its only added effect is carrying the credential.
+
+The export-location metadata exposes `weka_org_name` and `weka_org_user`
+(the mount user, e.g. `manila-mnt`) for reference.
+
+### Isolation config options
+
+```ini
+# HMAC-SHA256 key used to derive per-org admin passwords.
+# REQUIRED. The driver refuses to start (WekaConfigurationError) if
+# this is missing.  All WEKAFS shares are always created inside a
+# per-project Weka org with auth_required=True.
+weka_org_admin_secret = <long-random-string>  # SECRET, REQUIRED
+
+# Prefix applied to Weka organization names.
+# Full org name: <prefix><project_id>
+weka_org_prefix = manila-
+
+# Username of the per-org TenantAdmin user (internal, never exposed).
+# The least-privilege mount user is named <weka_org_user>-mnt.
+weka_org_user = manila
+
+# Directory where the driver writes its own per-org mount token
+# files (mode 0600) for internal operations such as snapshot copy.
+weka_auth_token_dir = /var/lib/manila/weka-tokens
+```
+
+> **Keep `weka_org_prefix` and `weka_org_user` stable** (like
+> `weka_org_admin_secret`). They determine the per-project organization
+> name and admin username the driver derives; changing either after
+> shares exist makes the driver look for a different org/user and will
+> break operations on existing WEKAFS shares (and may create new empty
+> orgs). `weka_org_prefix` must not contain path separators — the driver
+> rejects such a value at startup.
+
+## Multi-Tenancy (Weka Organizations — Manual Backend per Org)
+
+Each Weka organization can also be a separate Manila backend (manual
+approach, without per-project isolation):
 
 ```ini
 [weka-org-finance]

@@ -56,7 +56,8 @@ Manila driver operation.
 | `update_access` (NFS del) | `/nfsPermissions/{uid}` | DELETE | Remove permission |
 | `update_access` (NFS del) | `/clientGroups` | GET | Find client group by name |
 | `update_access` (NFS del) | `/clientGroups/{uid}` | DELETE | Remove per-rule client group |
-| `update_access` (WEKAFS) | *(no Weka API calls)* | — | All rules accepted as no-op (`active`); see [known-issues.md §6](known-issues.md#6-wekafs-shares-do-not-support-manila-access-rules) |
+| `update_access` (WEKAFS) | `/users` | POST | Ensure Regular mount user exists (idempotent) |
+| `update_access` (WEKAFS) | *(rule storage only)* | — | Rule returned as `active`; `access_key` set to mount user password. Enforcement is via Weka org auth (`auth_required=True`). No per-filesystem mount-token endpoint — token comes from `POST /login`. See [known-issues.md §6](known-issues.md#6-wekafs-shares-do-not-support-manila-access-rules) |
 
 ## Driver Setup
 
@@ -68,6 +69,10 @@ Manila driver operation.
 | `do_setup` | `/fileSystemGroups` | POST | Create if missing |
 | `check_for_setup_error` | `/status` | GET | Verify auth |
 | `login refresh` | `/login/refresh` | POST | Refresh access token |
+| WEKAFS share ops (isolation) | `/login` | POST | Log in as the per-org TenantAdmin for an org-scoped session |
+| WEKAFS `create_share` (isolation) | `/organizations` | GET | Check if the project's org exists |
+| WEKAFS `create_share` (isolation) | `/organizations` | POST | Create the org **and its TenantAdmin in one call** if absent |
+| WEKAFS `update_access` (isolation) | `/users` | POST | Lazily ensure the Regular mount user (`<weka_org_user>-mnt`); its password is returned as the rule's `access_key` |
 
 ## Statistics
 
@@ -76,6 +81,8 @@ Manila driver operation.
 | `_update_share_stats` | `/capacity` | GET | Cluster capacity |
 
 ## Authentication Token Flow
+
+### Driver API session (root org or per-org admin)
 
 ```
 Manila host                    Weka Cluster
@@ -100,6 +107,42 @@ Manila host                    Weka Cluster
     │  [refresh_token valid 1 year] │
 ```
 
+### WekaFS mount token (tenant, self-service via access_key)
+
+There is **no** `/fileSystems/{uid}/mountTokens` REST endpoint.  Mount
+tokens are obtained by calling `POST /login` with the Regular mount
+user's credentials (scoped to the project org), which returns a
+`refresh_token` written to a JSON file by `weka user login`.  The
+`auth_token_path` WekaFS mount option points to that file.
+
+The mount user's password is delivered self-service: the driver returns
+it as the `access_key` of the Manila access rule when a tenant calls
+`share access create` on a WEKAFS share.  Manila's `access_key` column
+is String(255); the short HMAC-derived password fits — a raw Weka JWT
+would not.
+
+```
+Tenant client                  Weka Cluster
+    │                               │
+    │  (retrieves password from     │
+    │   openstack share access      │
+    │   list → Access Key)          │
+    │                               │
+    │── POST /login ───────────────►│
+    │   {username: manila-mnt,      │
+    │    password: <access_key>,    │
+    │    org: <weka_org_name>}      │
+    │◄── {access_token,             │
+    │     refresh_token} ──────────►│
+    │                               │
+    │  token written to             │
+    │  ~/.weka/auth-token.json      │
+    │                               │
+    │── mount -t wekafs             │
+    │   -o auth_token_path=<file>   │
+    │   <backend>/<fs> <mnt> ──────►│ (kernel client reads token file)
+```
+
 ## Complete Weka API v2 Endpoint Coverage
 
 The `WekaApiClient` implements the following endpoints.  Those marked
@@ -108,7 +151,6 @@ with (D) are driver-critical; (S) are stubs included for SDK completeness.
 ### Filesystem
 - GET/POST `/fileSystems` (D)
 - GET/PUT/DELETE `/fileSystems/{uid}` (D)
-- POST `/fileSystems/{uid}/mountTokens` (D)
 - POST/DELETE `/fileSystems/{uid}/objectStoreBuckets` (S)
 - GET/POST/PATCH/DELETE `/fileSystems/{uid}/quota/{inode_id}` (D)
 - GET/POST/DELETE `/fileSystems/{uid}/defaultQuota` (S)
@@ -118,8 +160,9 @@ with (D) are driver-critical; (S) are stubs included for SDK completeness.
 - GET/PUT/DELETE `/fileSystemGroups/{uid}` (D)
 
 ### Organizations
-- GET/POST `/organizations` (S)
-- GET/PUT/DELETE `/organizations/{uid}` (S)
+- GET/POST `/organizations` (D) — used by WEKAFS isolation to look up
+  or create per-project org
+- GET/PUT/DELETE `/organizations/{uid}` (D)
 - PUT `/organizations/{uid}/limits` (S)
 - PUT `/organizations/{uid}/security` (S)
 
@@ -144,7 +187,11 @@ with (D) are driver-critical; (S) are stubs included for SDK completeness.
 - GET `/capacity` (D)
 
 ### Users
-- GET/POST `/users` (S)
+- GET/POST `/users` (D) — the TenantAdmin is created as part of
+  `POST /organizations` (create_organization), not via `/users`.
+  `POST /users` is used only for the Regular mount user (role: Regular,
+  username: `<weka_org_user>-mnt`), created lazily by `update_access`
+  (WEKAFS) and idempotent if it already exists
 - DELETE `/users/{uid}` (S)
 
 ### KMS / Security

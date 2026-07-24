@@ -52,13 +52,13 @@ class TestWekaMountBuildOptions(unittest.TestCase):
         m = _make_mount(num_cores=1)
         opts = m._build_mount_options()
         self.assertIn('num_cores=1', opts)
-        self.assertNotIn('mount_token=', ' '.join(opts))
+        self.assertNotIn('auth_token_path=', ' '.join(opts))
         self.assertNotIn('net=', ' '.join(opts))
 
-    def test_mount_token_included_when_set(self):
-        m = _make_mount(mount_token='abc123')
+    def test_auth_token_path_included_when_set(self):
+        m = _make_mount(auth_token_path='/var/lib/manila/tok.json')
         opts = m._build_mount_options()
-        self.assertIn('mount_token=abc123', opts)
+        self.assertIn('auth_token_path=/var/lib/manila/tok.json', opts)
 
     def test_net_included_when_set(self):
         m = _make_mount(net='eth0')

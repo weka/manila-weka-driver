@@ -29,7 +29,6 @@ Manila Service (share-manager process)
 │   │
 │   ├── Filesystem operations
 │   │   ├── GET/POST/PUT/DELETE /fileSystems
-│   │   ├── POST /fileSystems/{uid}/mountTokens
 │   │   └── POST/DELETE /fileSystems/{uid}/objectStoreBuckets
 │   │
 │   ├── Filesystem group operations
@@ -151,7 +150,12 @@ When `share_proto == 'NFS'`:
 When `share_proto == 'WEKAFS'`:
 - The filesystem is mounted locally on the Manila host via `mount -t wekafs`
 - Export path: `<weka_api_server>/<fs_name>`
-- Access rules are recorded but enforcement is at Weka auth level
+- The filesystem is always created inside the project's own Weka org
+  with `auth_required=True`; only a client holding a token scoped to
+  that org can mount it.  See §10 below.
+- Manila access rules (IP/user) are accepted as `active` but have no
+  effect on the WekaFS mount path; enforcement is via Weka org auth.
+  See [Known Issues §6](known-issues.md#6-wekafs-shares-do-not-support-manila-access-rules).
 
 ### 9. `create_share_from_snapshot` data copy
 
@@ -166,3 +170,71 @@ operation for read-only snapshots.  The driver implements this by:
 This approach works for both NFS and WEKAFS protocol shares but copy time
 scales with snapshot data size.  See
 [Known Issues](known-issues.md#2-create_share_from_snapshot-uses-nfs-based-data-copy).
+
+### 10. Per-tenant WEKAFS isolation via Weka organizations
+
+Every Manila project gets its own Weka organization (tenant).  This is
+mandatory for all WEKAFS shares and requires a Weka cluster with
+multi-tenant organization support (5.x REST v2):
+
+```
+Manila project_id ──► Weka org  <weka_org_prefix><project_id>
+                            │
+                            └── WEKAFS filesystem (auth_required=True)
+                                  Only mountable with a token scoped
+                                  to this org — enforced by the cluster.
+```
+
+**Two principals per org:**
+`POST /organizations {name, username, password}` creates the Weka org
+and its **TenantAdmin** user in one call.  The driver then calls
+`POST /users` to create a least-privilege **Regular** mount user
+(username = `weka_org_user + "-mnt"`, e.g. `manila-mnt`).
+
+Passwords are derived deterministically — no per-tenant secret stored:
+- TenantAdmin: `HMAC-SHA256(weka_org_admin_secret, project_id)`
+- Mount user:  `HMAC-SHA256(weka_org_admin_secret, project_id + ":mount")`
+
+Each digest is then formatted to satisfy Weka's password-complexity
+rules, so the actual password is not the raw hex output.
+
+**Org-scoped sessions:**
+Weka binds filesystem operations to the authenticated session's org,
+not to a request field.  For every create/delete/extend/shrink on a
+WEKAFS share, the driver logs in as the per-org admin (`POST /login`
+with `org=<org_name>`) and performs the operation in that session.
+This is fundamentally different from NFS, which uses IP-based
+enforcement through client groups and NFS permissions on the root
+session.
+
+**Access control comparison:**
+
+| Protocol | Isolation mechanism | Manila access rules |
+|----------|--------------------|--------------------|
+| WEKAFS   | Weka org + `auth_required=True` on FS | Accepted; returns mount credential via `access_key` |
+| NFS      | IP-based client groups + NFS perms | Enforced |
+
+**Org lifecycle:**
+The org and its admin user are retained when the project's last share
+is deleted.  They are never torn down automatically.
+
+**Self-service credential delivery:**
+When a tenant creates a Manila access rule on a WEKAFS share,
+`_update_wekafs_access` ensures the Regular mount user exists and
+returns its password as the rule's **access_key** (Manila's
+`access_key` column is String(255); the short HMAC-derived password
+fits — a raw Weka JWT would not).  Tenants retrieve it with:
+
+```
+openstack share access list <share> -c "Access Key"
+openstack share access show <id> -c access_key
+```
+
+The access rule has no enforcement effect; its only function is to
+carry the credential.  Export-location metadata exposes
+`weka_org_name` and `weka_org_user` (the mount user, e.g.
+`manila-mnt`) for reference.
+
+The driver writes its own internal mount tokens (mode 0600) to
+`weka_auth_token_dir` (default `/var/lib/manila/weka-tokens`) for
+operations such as snapshot data copy.
