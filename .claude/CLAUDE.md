@@ -74,11 +74,11 @@ pytest tests/unit/test_driver.py::TestWekaShareDriver::test_create_share -v
 ## Architecture Notes
 
 - `driver.py` implements the Manila `ShareDriver` interface (create, delete, extend, shrink, snapshot, access control, stats)
-- `client.py` wraps Weka REST API v2 with auth, retries, and error handling
-- `posix.py` manages WekaFS kernel mounts via `mount -t wekafs`
+- `client.py` wraps Weka REST API v2 with auth, retries, and error handling; includes organization/user CRUD and `for_org()` org-scoped sessions
+- `posix.py` manages WekaFS kernel mounts via `mount -t wekafs` (auth mounts use `auth_token_path=<file>`)
 - All operations are idempotent
-- WEKAFS access rules are accepted as no-op (no Manila-level access control for WEKAFS)
-- NFS access rules use IP-based enforcement
+- Per-tenant WEKAFS isolation (default on, `weka_wekafs_isolation`): each Manila project maps to its own Weka organization; WEKAFS filesystems are created with `auth_required=True` inside that org via an org-scoped client. Passwords derived via HMAC(`weka_org_admin_secret`, project_id[+tag]): the org TenantAdmin (driver-internal) and a least-privilege `Regular` mount user. Org name + mount user surfaced in export metadata; the mount-user password is returned to tenants as the `access_key` of a WEKAFS access rule (self-service; no operator hand-off). Orgs retained on last-share delete.
+- WEKAFS Manila access rules are accepted as a no-op (`active`) for enforcement — real enforcement is at the org boundary — but on an isolated share the rule also carries the mount credential in `access_key`. NFS access rules use IP-based enforcement.
 
 ## Agentic Flow
 

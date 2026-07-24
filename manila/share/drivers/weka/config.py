@@ -83,6 +83,69 @@ weka_opts = [
         ),
     ),
 
+    # --- WEKAFS per-tenant isolation ---
+    cfg.BoolOpt(
+        'weka_wekafs_isolation',
+        default=True,
+        help=(
+            'Enforce per-tenant isolation for WEKAFS shares. When True '
+            '(default), each Manila project is mapped to a dedicated Weka '
+            'organization and its filesystems are created with '
+            'authentication required, so a client can only mount a share '
+            'if it holds a token scoped to that project\'s organization. '
+            'When False, WEKAFS filesystems are created in the '
+            'weka_organization with authentication disabled (legacy '
+            'behaviour: any host on the Weka fabric can mount). NFS shares '
+            'are unaffected by this option.'
+        ),
+    ),
+    cfg.StrOpt(
+        'weka_org_admin_secret',
+        secret=True,
+        help=(
+            'Secret key used to derive the per-organization admin password '
+            'for WEKAFS tenant isolation. The password for each project\'s '
+            'Weka organization admin is derived deterministically as '
+            'HMAC-SHA256(weka_org_admin_secret, project_id), so no '
+            'per-tenant secret is stored by the driver. Required when '
+            'weka_wekafs_isolation is True. Keep this value stable: '
+            'rotating it invalidates the logins of existing organizations.'
+        ),
+    ),
+    cfg.StrOpt(
+        'weka_org_prefix',
+        default='manila-',
+        help=(
+            'Prefix for Weka organization names created per Manila project. '
+            'The full name is "<prefix><project_id>" with dashes stripped '
+            'from the project ID (not truncated). Default is "manila-".'
+        ),
+    ),
+    cfg.StrOpt(
+        'weka_org_user',
+        default='manila',
+        help=(
+            'Base username for the per-project Weka organization. The '
+            'driver creates the org\'s internal TenantAdmin under this '
+            'name (used only by the driver), plus a least-privilege '
+            'Regular mount user named "<weka_org_user>-mnt" that tenants '
+            'log in as to mount shares. The mount user\'s password is '
+            'delivered to tenants via the WEKAFS access rule access_key. '
+            'Default is "manila" (so the mount user is "manila-mnt").'
+        ),
+    ),
+    cfg.StrOpt(
+        'weka_auth_token_dir',
+        default='/var/lib/manila/weka-tokens',
+        help=(
+            'Directory on the Manila host where the driver writes '
+            'per-organization mount-token files used for its own WEKAFS '
+            'mounts (snapshot copies, ensure_share). Files are created '
+            'with 0600 permissions. Default is '
+            '"/var/lib/manila/weka-tokens".'
+        ),
+    ),
+
     # --- POSIX client ---
     cfg.StrOpt(
         'weka_mount_point_base',

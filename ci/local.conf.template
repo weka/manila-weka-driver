@@ -74,6 +74,12 @@ weka_mount_point_base = /mnt/weka/nfs
 # NFS server the driver mounts from to copy snapshot data
 # (create_share_from_snapshot). Same host as the API in this CI.
 weka_nfs_server = ${WEKA_API_SERVER}
+# Per-tenant WEKAFS isolation defaults to True in production but is
+# disabled here: it requires distributing a per-project Weka org mount
+# token to each client, which this single-tenant tempest environment
+# does not do. Setting it false also avoids requiring
+# weka_org_admin_secret. (NFS shares are unaffected by this option.)
+weka_wekafs_isolation = false
 
 # ── WEKAFS backend ───────────────────────────────────────
 [weka_wekafs]
@@ -95,6 +101,10 @@ weka_organization = ${WEKA_ORGANIZATION}
 weka_filesystem_group = default
 weka_share_name_prefix = ci_wfs_
 weka_mount_point_base = /mnt/weka/wekafs
+# Disabled in CI — see the note on the weka_nfs backend above. Enabling
+# per-tenant isolation here would require minting and delivering a Weka
+# org mount token to the tempest client before WEKAFS mounts succeed.
+weka_wekafs_isolation = false
 
 [[post-config|$TEMPEST_CONFIG]]
 [service_available]

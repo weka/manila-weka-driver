@@ -73,7 +73,10 @@ Known limitations
     begins.
 """
 
+import hashlib
+import hmac
 import ipaddress
+import json
 import os
 import socket
 import tempfile
@@ -174,6 +177,16 @@ class WekaShareDriver(driver.ShareDriver):
     # Driver capability flags
     _is_driver_handles_share_servers = False
 
+    # Per-tenant WEKAFS isolation defaults.  These represent the
+    # "unconfigured" state; do_setup() overrides them from config (where
+    # weka_wekafs_isolation defaults to True).  Kept at class scope so
+    # the scalars have safe values even before do_setup runs.
+    _wekafs_isolation = False
+    _org_prefix = 'manila-'
+    _org_user = 'manila'
+    _org_admin_secret = None
+    _auth_token_dir = '/var/lib/manila/weka-tokens'
+
     def __init__(self, *args, **kwargs):
         """Initialise driver state; API client created in do_setup."""
         super(WekaShareDriver, self).__init__(
@@ -189,6 +202,11 @@ class WekaShareDriver(driver.ShareDriver):
         self._async_copies_lock = threading.Lock()
         # Capability: NFS copy requires weka_nfs_server; set in do_setup.
         self._nfs_server = None
+        # Per-tenant WEKAFS isolation: project_id -> org-scoped client.
+        # Scalar isolation settings are class attributes configured in
+        # do_setup; the client pool is per-instance mutable state.
+        self._org_clients = {}
+        self._org_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Setup / validation
@@ -226,6 +244,19 @@ class WekaShareDriver(driver.ShareDriver):
             pool_maxsize=pool_maxsize,
         )
         self._client.login()
+
+        # Per-tenant WEKAFS isolation configuration (BoolOpt default True).
+        self._wekafs_isolation = cfg_get('weka_wekafs_isolation')
+        self._org_prefix = cfg_get('weka_org_prefix') or 'manila-'
+        self._org_user = cfg_get('weka_org_user') or 'manila'
+        self._org_admin_secret = cfg_get('weka_org_admin_secret')
+        self._auth_token_dir = (
+            cfg_get('weka_auth_token_dir') or '/var/lib/manila/weka-tokens')
+        if self._wekafs_isolation and not self._org_admin_secret:
+            raise weka_exc.WekaConfigurationError(
+                reason=_(
+                    'weka_org_admin_secret must be set when '
+                    'weka_wekafs_isolation is enabled'))
 
         # Cache the NFS server for capability reporting.
         self._nfs_server = cfg_get('weka_nfs_server')
@@ -332,9 +363,16 @@ class WekaShareDriver(driver.ShareDriver):
             share['id'], share_proto, share['size'], fs_name,
         )
 
+        # WEKAFS shares are created inside the project's own Weka
+        # organization with authentication required (per-tenant
+        # isolation); NFS shares stay in the admin organization.
+        client = self._client_for_share(share)
+        auth_required = self._is_isolated_wekafs(share)
+
         # Create filesystem (idempotent — handle conflict).
         fs = self._create_filesystem_idempotent(
-            fs_name, group_name, size_bytes)
+            fs_name, group_name, size_bytes,
+            client=client, auth_required=auth_required)
         fs_uid = fs['uid']
 
         export_locations = self._build_export_locations(
@@ -379,12 +417,17 @@ class WekaShareDriver(driver.ShareDriver):
 
         snap_name = self._snapshot_name(snapshot['id'])
 
-        snap = self._client.get_snapshot_by_name(snap_name)
+        # Source snapshot, source filesystem and the new filesystem all
+        # live in the same project's organization, so operate through
+        # the share-scoped client.
+        client = self._client_for_share(share)
+
+        snap = client.get_snapshot_by_name(snap_name)
         if not snap:
             raise exception.ShareSnapshotNotFound(snapshot_id=snapshot['id'])
 
         # Resolve the source filesystem name from the snapshot's fs UID.
-        src_fs = self._client.get_filesystem(snap['filesystemUid'])
+        src_fs = client.get_filesystem(snap['filesystemUid'])
         src_fs_name = src_fs['name']
 
         new_fs_name = self._share_name(share['id'])
@@ -393,7 +436,9 @@ class WekaShareDriver(driver.ShareDriver):
         size_bytes = weka_utils.gb_to_bytes(share['size'])
 
         fs = self._create_filesystem_idempotent(
-            new_fs_name, group_name, size_bytes)
+            new_fs_name, group_name, size_bytes,
+            client=client,
+            auth_required=self._is_isolated_wekafs(share))
         fs_uid = fs['uid']
 
         export_locations = self._build_export_locations(
@@ -605,6 +650,9 @@ class WekaShareDriver(driver.ShareDriver):
             self.configuration.safe_get('weka_num_cores') or 1)
         net = self.configuration.safe_get('weka_net_device')
         backends = self._get_backends()
+        # Both filesystems are in the project's org; one token covers
+        # both mounts (None when isolation is disabled).
+        auth_token_path = self._org_token_file(share.get('project_id'))
 
         src_mnt = tempfile.mkdtemp(prefix='manila_weka_snap_src_')
         dst_mnt = tempfile.mkdtemp(prefix='manila_weka_snap_dst_')
@@ -613,6 +661,7 @@ class WekaShareDriver(driver.ShareDriver):
                 backends=backends,
                 fs_name=src_fs_name,
                 mount_point=src_mnt,
+                auth_token_path=auth_token_path,
                 num_cores=num_cores,
                 net=net,
             ):
@@ -620,6 +669,7 @@ class WekaShareDriver(driver.ShareDriver):
                     backends=backends,
                     fs_name=new_fs_name,
                     mount_point=dst_mnt,
+                    auth_token_path=auth_token_path,
                     num_cores=num_cores,
                     net=net,
                 ):
@@ -698,7 +748,12 @@ class WekaShareDriver(driver.ShareDriver):
         LOG.debug(
             "Deleting share %s (Weka FS '%s')", share['id'], fs_name)
 
-        fs = self._client.get_filesystem_by_name(fs_name)
+        # WEKAFS shares live in the project's org; NFS shares in admin.
+        # The project's org (and its admin user) are intentionally
+        # retained after the last share is deleted.
+        client = self._client_for_share(share)
+
+        fs = client.get_filesystem_by_name(fs_name)
         if not fs:
             LOG.info(
                 "Filesystem '%s' not found — share %s already deleted",
@@ -708,7 +763,7 @@ class WekaShareDriver(driver.ShareDriver):
 
         fs_uid = fs['uid']
 
-        # Remove NFS permissions before deleting.
+        # Remove NFS permissions before deleting (no-op for WEKAFS).
         try:
             self._remove_all_nfs_permissions(fs_name)
         except Exception as exc:
@@ -717,7 +772,8 @@ class WekaShareDriver(driver.ShareDriver):
                 share['id'], exc,
             )
 
-        # Unmount locally if mounted.
+        # Unmount locally if mounted.  Unmount takes no mount options, so
+        # no auth token is needed here.
         mount_point = self._mount_point(fs_name)
         if weka_posix.WekaMount.is_mounted(mount_point):
             try:
@@ -735,7 +791,7 @@ class WekaShareDriver(driver.ShareDriver):
 
         # Delete the filesystem.
         try:
-            self._client.delete_filesystem(fs_uid)
+            client.delete_filesystem(fs_uid)
         except weka_exc.WekaNotFound:
             pass  # already gone
 
@@ -747,19 +803,21 @@ class WekaShareDriver(driver.ShareDriver):
         :param share: Share model.
         :param new_size: New size in GiB.
         """
-        fs_uid = self._get_fs_uid_for_share(share)
+        client = self._client_for_share(share)
+        fs_uid = self._get_fs_uid_for_share(share, client=client)
         new_bytes = weka_utils.gb_to_bytes(new_size)
         LOG.info(
             "Extending share %s to %s GiB", share['id'], new_size)
-        self._client.update_filesystem(fs_uid, total_capacity=new_bytes)
+        client.update_filesystem(fs_uid, total_capacity=new_bytes)
 
     def shrink_share(self, share, new_size, share_server=None):
         """Shrink share capacity.
 
         Raises ShareShrinkingPossibleDataLoss if in-use > new_size.
         """
-        fs_uid = self._get_fs_uid_for_share(share)
-        fs = self._client.get_filesystem(fs_uid)
+        client = self._client_for_share(share)
+        fs_uid = self._get_fs_uid_for_share(share, client=client)
+        fs = client.get_filesystem(fs_uid)
         used_bytes = fs.get('used_total', fs.get('usedSizeBytes', 0)) or 0
         new_bytes = weka_utils.gb_to_bytes(new_size)
 
@@ -769,7 +827,7 @@ class WekaShareDriver(driver.ShareDriver):
 
         LOG.info(
             "Shrinking share %s to %s GiB", share['id'], new_size)
-        self._client.update_filesystem(fs_uid, total_capacity=new_bytes)
+        client.update_filesystem(fs_uid, total_capacity=new_bytes)
 
     def get_backend_info(self, context):
         """Return stable backend identifiers used by ensure_shares."""
@@ -818,7 +876,14 @@ class WekaShareDriver(driver.ShareDriver):
             ensure_shares to avoid a per-share API call.
         """
         fs_name = self._share_name(share['id'])
-        if fs_by_name is not None:
+        share_proto = share['share_proto'].upper()
+        # Isolated WEKAFS filesystems live in a per-project org and are
+        # invisible to the admin session's list, so resolve them through
+        # the org-scoped client rather than the pre-fetched cache.
+        if self._is_isolated_wekafs(share):
+            fs = self._org_client(
+                share.get('project_id')).get_filesystem_by_name(fs_name)
+        elif fs_by_name is not None:
             fs = fs_by_name.get(fs_name)
         else:
             fs = self._client.get_filesystem_by_name(fs_name)
@@ -826,7 +891,6 @@ class WekaShareDriver(driver.ShareDriver):
             raise exception.ShareNotFound(share_id=share['id'])
 
         fs_uid = fs['uid']
-        share_proto = share['share_proto'].upper()
 
         # Re-mount POSIX if needed.
         mount_point = self._mount_point(fs_name)
@@ -840,6 +904,8 @@ class WekaShareDriver(driver.ShareDriver):
                 backends=self._get_backends(),
                 fs_name=fs_name,
                 mount_point=mount_point,
+                auth_token_path=self._org_token_file(
+                    share.get('project_id')),
                 num_cores=(
                     self.configuration.safe_get('weka_num_cores') or 1),
                 net=self.configuration.safe_get('weka_net_device'),
@@ -1033,25 +1099,46 @@ class WekaShareDriver(driver.ShareDriver):
     def _update_wekafs_access(self, share, add_rules, delete_rules):
         """Handle WekaFS access rules.
 
-        Access control for the WekaFS (POSIX client) protocol is managed
-        entirely within the Weka cluster via filesystem-level
-        authentication and mount tokens.  The Manila access-rules API
-        has no mapping onto those mechanisms in the current driver
-        implementation.
+        Access to a WEKAFS share is enforced at the Weka organization
+        boundary, not per Manila access rule: when weka_wekafs_isolation
+        is enabled the filesystem is created with authentication
+        required inside the project's own organization, so only a client
+        holding a token scoped to that organization can mount it.
 
-        All rules are accepted as a no-op so that the Manila access rule
-        workflow completes normally.
+        There is no per-IP / per-client Weka primitive for the POSIX
+        client, so each rule is accepted as a no-op (marked active).  As
+        a self-service convenience, when isolation is on the driver
+        ensures a least-privilege (Regular) mount user exists in the
+        project's org and returns that user's password as the rule's
+        access_key, so tenants can mint their own mount token via
+        ``weka user login`` without an operator handing them a secret.
+        The org's TenantAdmin credential is never exposed.
         """
         rule_state_map = {}
+        access_key = None
+        if add_rules and self._is_isolated_wekafs(share):
+            project_id = share.get('project_id')
+            org_client = self._org_client(project_id)
+            mount_user = self._org_mount_user()
+            access_key = self._org_mount_password(project_id)
+            try:
+                org_client.create_user(mount_user, 'Regular', access_key)
+            except weka_exc.WekaApiError as exc:
+                # Idempotent: the mount user may already exist from an
+                # earlier access rule on another share in this project.
+                if not _is_already_exists_error(exc):
+                    raise
         for rule in add_rules or []:
             LOG.info(
-                "WekaFS shares do not enforce Manila access rules "
-                "(type=%s, rule=%s). Access control for WEKAFS shares is "
-                "managed via Weka filesystem authentication and mount "
-                "tokens.",
-                rule['access_type'], rule['access_id'],
+                "WEKAFS access for share %s is enforced at the Weka "
+                "organization boundary; per-rule entry %s (type=%s) is "
+                "accepted as a no-op.",
+                share['id'], rule['access_id'], rule['access_type'],
             )
-            rule_state_map[rule['access_id']] = {'state': 'active'}
+            entry = {'state': 'active'}
+            if access_key:
+                entry['access_key'] = access_key
+            rule_state_map[rule['access_id']] = entry
         return rule_state_map
 
     def _remove_nfs_rule(self, fs_name, rule):
@@ -1112,14 +1199,15 @@ class WekaShareDriver(driver.ShareDriver):
     def create_snapshot(self, context, snapshot, share_server=None):
         """Create a snapshot of a share's underlying filesystem."""
         share = snapshot['share']
-        fs_uid = self._get_fs_uid_for_share(share)
+        client = self._client_for_share(share)
+        fs_uid = self._get_fs_uid_for_share(share, client=client)
         snap_name = self._snapshot_name(snapshot['id'])
 
         LOG.info(
             "Creating snapshot %s (name='%s') for share %s",
             snapshot['id'], snap_name, share['id'],
         )
-        self._client.create_snapshot(
+        client.create_snapshot(
             fs_uid, name=snap_name, is_writable=False)
 
     def delete_snapshot(self, context, snapshot, share_server=None):
@@ -1128,9 +1216,10 @@ class WekaShareDriver(driver.ShareDriver):
         Idempotent: silently ignores not-found.
         """
         share = snapshot['share']
+        client = self._client_for_share(share)
         fs_uid = None
         try:
-            fs_uid = self._get_fs_uid_for_share(share)
+            fs_uid = self._get_fs_uid_for_share(share, client=client)
         except exception.ShareNotFound:
             LOG.info(
                 "Parent share %s not found — skipping snapshot delete",
@@ -1143,13 +1232,13 @@ class WekaShareDriver(driver.ShareDriver):
             "Deleting snapshot %s (name='%s')",
             snapshot['id'], snap_name,
         )
-        snap = self._client.get_snapshot_by_name(snap_name, fs_uid=fs_uid)
+        snap = client.get_snapshot_by_name(snap_name, fs_uid=fs_uid)
         if not snap:
             LOG.info(
                 "Snapshot '%s' not found — already deleted", snap_name)
             return
         try:
-            self._client.delete_snapshot(snap['uid'])
+            client.delete_snapshot(snap['uid'])
         except weka_exc.WekaNotFound:
             pass
 
@@ -1157,10 +1246,11 @@ class WekaShareDriver(driver.ShareDriver):
                            snapshot_access_rules, share_server=None):
         """Revert a share to a snapshot (in-place restore)."""
         share = snapshot['share']
-        fs_uid = self._get_fs_uid_for_share(share)
+        client = self._client_for_share(share)
+        fs_uid = self._get_fs_uid_for_share(share, client=client)
         snap_name = self._snapshot_name(snapshot['id'])
 
-        snap = self._client.get_snapshot_by_name(snap_name, fs_uid=fs_uid)
+        snap = client.get_snapshot_by_name(snap_name, fs_uid=fs_uid)
         if not snap:
             raise exception.ShareSnapshotNotFound(snapshot_id=snapshot['id'])
 
@@ -1168,7 +1258,7 @@ class WekaShareDriver(driver.ShareDriver):
             "Reverting share %s to snapshot %s",
             share['id'], snapshot['id'],
         )
-        self._client.restore_snapshot(snap['uid'], fs_uid)
+        client.restore_snapshot(snap['uid'], fs_uid)
 
     # ------------------------------------------------------------------
     # Statistics
@@ -1354,14 +1444,178 @@ class WekaShareDriver(driver.ShareDriver):
         """Return the Weka backend address string for POSIX mounts."""
         return self.configuration.safe_get('weka_api_server') or ''
 
-    def _get_fs_uid_for_share(self, share):
+    # ------------------------------------------------------------------
+    # Per-tenant organization helpers (WEKAFS isolation)
+    # ------------------------------------------------------------------
+
+    def _org_name(self, project_id):
+        """Return the Weka organization name for a Manila project.
+
+        Uses the full project_id (dashes stripped), never truncated, so
+        distinct projects can never collide onto the same org name. Weka
+        org names comfortably exceed the ~39 chars a standard 32-hex
+        Keystone UUID produces (verified accepting 64+ on 5.1.x).
+        """
+        pid = (project_id or '').replace('-', '')
+        return '{}{}'.format(self._org_prefix, pid)
+
+    def _derive_password(self, project_id, tag=''):
+        """Derive a deterministic Weka password for a project.
+
+        HMAC-SHA256(weka_org_admin_secret, project_id + tag) formatted to
+        meet Weka's password complexity.  The fixed affixes guarantee all
+        classes regardless of the (hex-only) digest: 'W' (upper), 'k'
+        (lower), '1' (digit), '!' (special).  No per-tenant secret is
+        stored; anyone holding weka_org_admin_secret can re-derive it.
+        The *tag* namespaces distinct principals in the same org (e.g. the
+        TenantAdmin vs the Regular mount user) so they get different
+        passwords.
+        """
+        digest = hmac.new(
+            (self._org_admin_secret or '').encode('utf-8'),
+            ((project_id or '') + tag).encode('utf-8'),
+            hashlib.sha256).hexdigest()
+        # Trailing '1!' guarantees a digit + special even though the hex
+        # digest slice contains only [0-9a-f] (which may lack a digit).
+        return 'Wk{}1!'.format(digest[:20])
+
+    def _org_password(self, project_id):
+        """Per-org TenantAdmin password (driver-internal; never exposed)."""
+        return self._derive_password(project_id)
+
+    def _org_mount_password(self, project_id):
+        """Per-org Regular mount-user password (handed to tenants).
+
+        Returned to tenants via update_access so they can mint their own
+        mount token; scoped to a least-privilege Regular user in their
+        own org.
+        """
+        return self._derive_password(project_id, ':mount')
+
+    def _org_mount_user(self):
+        """Least-privilege (Regular) username tenants use to mount."""
+        return '{}-mnt'.format(self._org_user)
+
+    def _ensure_org(self, project_id):
+        """Get-or-create the Weka organization for a Manila project.
+
+        Idempotent; tolerates a concurrent creation by another
+        manila-share process.  Returns (org_name, username, password).
+        Must be called with self._org_lock held (via _org_client).
+        """
+        org_name = self._org_name(project_id)
+        username = self._org_user
+        password = self._org_password(project_id)
+        org = self._client.get_organization_by_name(org_name)
+        if org is None:
+            LOG.info(
+                "Creating Weka organization '%s' for project %s",
+                org_name, project_id)
+            try:
+                self._client.create_organization(
+                    org_name, username, password)
+            except weka_exc.WekaApiError as exc:
+                if not _is_already_exists_error(exc):
+                    raise weka_exc.WekaOrgError(
+                        reason='failed to create organization '
+                               '{}: {}'.format(org_name, exc))
+        return org_name, username, password
+
+    def _org_client(self, project_id):
+        """Return a cached API client authenticated to the project's org.
+
+        Creates the organization (and its admin user) on first use, then
+        logs in as that admin and caches the client for reuse.
+
+        :raises WekaOrgError: if project_id is missing — mapping a share
+            with no project to an org would silently collapse distinct
+            tenants into one org (``<prefix>``) and break isolation.
+        """
+        if not project_id:
+            raise weka_exc.WekaOrgError(
+                reason='share has no project_id; cannot map it to a '
+                       'per-tenant Weka organization')
+        with self._org_lock:
+            client = self._org_clients.get(project_id)
+            if client is None:
+                org_name, username, password = self._ensure_org(project_id)
+                client = self._client.for_org(
+                    org_name, username, password)
+                self._org_clients[project_id] = client
+            return client
+
+    def _is_isolated_wekafs(self, share):
+        """True if *share* is a WEKAFS share under per-tenant isolation."""
+        proto = (share.get('share_proto') or '').upper()
+        return self._wekafs_isolation and proto == _WEKAFS_PROTO
+
+    def _client_for_share(self, share):
+        """Return the API client scoped to a share's filesystem.
+
+        WEKAFS shares live in a per-project organization when isolation
+        is enabled, so their filesystem operations must go through a
+        client authenticated to that org.  NFS shares — and all shares
+        when isolation is disabled — use the default admin client.
+        """
+        if self._is_isolated_wekafs(share):
+            return self._org_client(share.get('project_id'))
+        return self._client
+
+    def _org_token_file(self, project_id):
+        """Write the org's mount-token file (0600) and return its path.
+
+        Returns None when isolation is disabled (no token is needed for
+        the driver's own WEKAFS mounts).
+        """
+        if not self._wekafs_isolation:
+            return None
+        client = self._org_client(project_id)
+        token_dir = self._auth_token_dir
+        try:
+            os.makedirs(token_dir, mode=0o700, exist_ok=True)
+            # makedirs' mode only applies on creation (and is umask-masked);
+            # tighten an existing dir so tokens aren't world-readable.
+            try:
+                os.chmod(token_dir, 0o700)
+            except OSError:
+                pass
+            path = os.path.join(
+                token_dir, '{}.json'.format(self._org_name(project_id)))
+            # Write to a unique temp file (mkstemp is 0600 and collision-
+            # free across concurrent threads/processes) then atomically
+            # rename, so a mount never reads a partial/empty token file.
+            fd, tmp = tempfile.mkstemp(
+                dir=token_dir, prefix='.tok-', suffix='.tmp')
+            try:
+                with os.fdopen(fd, 'w') as fh:
+                    json.dump(client.auth_token_payload(), fh)
+                os.replace(tmp, path)
+            except OSError:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            return path
+        except OSError as exc:
+            raise weka_exc.WekaMountError(
+                reason='failed to write auth token file: {}'.format(exc))
+
+    def _get_fs_uid_for_share(self, share, client=None):
         """Look up the Weka filesystem UID for a share.
 
         First checks export locations metadata for a cached UID.
-        Falls back to listing filesystems by name.
+        Falls back to listing filesystems by name via *client* (the
+        share-scoped client; defaults to the admin client).
+
+        Weka filesystem UIDs are cluster-global, so the metadata
+        fast-path returns a usable UID regardless of *client*; *client*
+        only scopes the filesystem-name fallback lookup to the right
+        organization.
 
         :raises ShareNotFound: if the filesystem cannot be found.
         """
+        client = client or self._client
         # Try to get UID from export location metadata.
         for loc in share.get('export_locations', []) or []:
             try:
@@ -1381,7 +1635,7 @@ class WekaShareDriver(driver.ShareDriver):
 
         # Try the standard manila-generated filesystem name.
         fs_name = self._share_name(share['id'])
-        fs = self._client.get_filesystem_by_name(fs_name)
+        fs = client.get_filesystem_by_name(fs_name)
         if fs:
             return fs['uid']
 
@@ -1402,7 +1656,7 @@ class WekaShareDriver(driver.ShareDriver):
                 if ':' in candidate:
                     candidate = candidate.split(':', 1)[-1].lstrip('/')
                 if candidate:
-                    fs = self._client.get_filesystem_by_name(candidate)
+                    fs = client.get_filesystem_by_name(candidate)
                     if fs:
                         return fs['uid']
 
@@ -1424,9 +1678,17 @@ class WekaShareDriver(driver.ShareDriver):
             self._fs_group_uid = grp['uid']
 
     def _create_filesystem_idempotent(self, fs_name, group_name,
-                                      size_bytes):
-        """Create a filesystem; return existing one if already present."""
-        existing = self._client.get_filesystem_by_name(fs_name)
+                                      size_bytes, client=None,
+                                      auth_required=False):
+        """Create a filesystem; return existing one if already present.
+
+        :param client: API client to use (share-scoped; defaults to the
+            admin client).
+        :param auth_required: Create the filesystem with mount
+            authentication required (used for WEKAFS tenant isolation).
+        """
+        client = client or self._client
+        existing = client.get_filesystem_by_name(fs_name)
         if existing:
             LOG.debug(
                 "Filesystem '%s' already exists — reusing uid=%s",
@@ -1434,14 +1696,15 @@ class WekaShareDriver(driver.ShareDriver):
             )
             return existing
         try:
-            return self._client.create_filesystem(
+            return client.create_filesystem(
                 name=fs_name,
                 group_name=group_name,
                 total_capacity=size_bytes,
+                auth_required=auth_required,
             )
         except weka_exc.WekaConflict:
             # Race: created by another thread/request.
-            fs = self._client.get_filesystem_by_name(fs_name)
+            fs = client.get_filesystem_by_name(fs_name)
             if fs:
                 return fs
             raise
@@ -1483,6 +1746,15 @@ class WekaShareDriver(driver.ShareDriver):
             'weka_fs_uid': fs_uid,
             'weka_fs_name': fs_name,
         }
+        # For isolated WEKAFS shares, expose the Weka organization name and
+        # the least-privilege mount username tenants log in as. The mount
+        # password is delivered separately via update_access (access_key),
+        # so no secret appears in metadata.
+        if self._wekafs_isolation and share_proto == _WEKAFS_PROTO:
+            project_id = share.get('project_id')
+            if project_id:
+                metadata['weka_org_name'] = self._org_name(project_id)
+                metadata['weka_org_user'] = self._org_mount_user()
         return [{
             'path': path,
             'is_admin_only': False,

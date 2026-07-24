@@ -195,6 +195,11 @@ weka_max_api_retries   = 3
 | `weka_api_timeout` | `Int` | `30` | HTTP timeout for API requests (seconds) |
 | `weka_max_api_retries` | `Int` | `3` | Maximum retries on transient API errors |
 | `weka_share_name_prefix` | `String` | `manila_` | Prefix for Weka filesystem names |
+| `weka_wekafs_isolation` | `Bool` | `true` | Isolate each project's WEKAFS shares in a dedicated Weka organization with `auth_required` (see [Per-tenant isolation](#per-tenant-wekafs-isolation)). NFS unaffected |
+| `weka_org_admin_secret` | `String (secret)` | **required if isolation** | HMAC key used to derive per-organization admin passwords deterministically |
+| `weka_org_prefix` | `String` | `manila-` | Prefix for per-project Weka organization names |
+| `weka_org_user` | `String` | `manila` | Base org username: the driver's internal TenantAdmin. Tenants mount as the derived `<weka_org_user>-mnt` Regular user |
+| `weka_auth_token_dir` | `String` | `/var/lib/manila/weka-tokens` | Directory for the driver's own mount-token files (`0600`) |
 
 ## Supported Operations
 
@@ -217,20 +222,65 @@ weka_max_api_retries   = 3
 
 | Access Type | WEKAFS | NFS |
 |-------------|:------:|:---:|
-| `ip` | ✗ Rejected (`error` state) | ✓ Full enforcement |
-| `user` | ✗ Rejected (`error` state) | ✗ |
-| `cert` | ✗ | ✗ |
+| `ip` | Accepted (`active`); returns credential when isolation on | ✓ Full enforcement |
+| `user` | Accepted (`active`); returns credential when isolation on | ✗ |
+| `cert` | Accepted (`active`); returns credential when isolation on | ✗ |
 
-> **WEKAFS access rules:** All Manila access rule operations on WEKAFS shares
-> return `error` state. Access control is managed via Weka's own authentication
-> layer (filesystem `auth_required` flag and mount tokens). Use network-level
-> controls (VPC security groups, firewall rules) for WEKAFS share security.
-> See [Known Issues §6](docs/known-issues.md#6-wekafs-shares-do-not-support-manila-access-rules).
+> **WEKAFS access rules:** WEKAFS access is enforced at the **Weka
+> organization boundary**, not per Manila access rule. With per-tenant
+> isolation enabled (default), each project's filesystems are created with
+> `auth_required=True` in the project's own Weka organization, so only a
+> client holding a token scoped to that organization can mount them.
+> A Manila access rule on a WEKAFS share is therefore a no-op for
+> *enforcement*, but **when isolation is enabled** it returns the
+> least-privilege mount user's password as its `access_key`, so tenants
+> can self-serve their own mount token. With isolation disabled, the rule
+> is still accepted as `active` but no credential is returned (and the
+> filesystem is mountable without a token).
+> See [Per-tenant isolation](#per-tenant-wekafs-isolation).
 
-## Multi-tenancy
+## Per-tenant WEKAFS isolation
 
-Weka organizations map directly to Manila share types.  Each organization
-can have independent storage quotas and separate admin credentials.
+By default (`weka_wekafs_isolation = true`) each Manila project
+(`project_id`) is mapped to its own Weka **organization**. WEKAFS
+filesystems for that project are created inside the organization with
+`auth_required=True`, giving true cross-tenant isolation: a token scoped
+to project A's organization cannot mount project B's shares — the Weka
+cluster enforces this regardless of network reachability.
+
+The driver creates the organization on demand and derives its passwords
+deterministically from `weka_org_admin_secret` (no per-tenant secret is
+stored). Two principals exist per org: a **TenantAdmin** the driver uses
+internally, and a least-privilege **`Regular` mount user** for clients.
+The driver records `weka_org_name` and the derived mount username in each
+WEKAFS share's export-location metadata (metadata key `weka_org_user`,
+value `<weka_org_user>-mnt`, e.g. `manila-mnt`).
+
+Mounting is **self-service** — no operator hand-off. The tenant grants
+access, reads the mount user's password back as the rule's `access_key`,
+mints its own token, and mounts:
+
+```bash
+openstack share access create myshare user weka        # any 'user' rule
+KEY=$(openstack share access list myshare -f value -c "Access Key" | head -1)
+ORG=$(openstack share show myshare -f json \
+      | jq -r '.export_locations[0].metadata.weka_org_name')
+
+weka user login manila-mnt "$KEY" --org "$ORG" -H <weka-api>
+mount -t wekafs -o auth_token_path=~/.weka/auth-token.json \
+  <backend>/<fs_name> /mnt/point
+```
+
+The returned credential is a `Regular` (mount-only) user scoped to the
+tenant's own org — it cannot administer the org or reach other tenants.
+Organizations (and their users) are **retained** when a project's last
+share is deleted. NFS shares are unaffected by this option.
+
+## Multi-tenancy (manual, legacy)
+
+Independently of automatic isolation, Weka organizations can also be
+mapped to Manila share types.  Each organization can have independent
+storage quotas and separate admin credentials.
 
 To create a Manila share type targeting a specific Weka organization:
 

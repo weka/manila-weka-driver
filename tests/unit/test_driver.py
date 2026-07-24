@@ -14,6 +14,10 @@
 
 """Unit tests for manila.share.drivers.weka.driver."""
 
+import json
+import os
+import shutil
+import tempfile
 import threading
 import unittest
 from unittest import mock
@@ -50,6 +54,11 @@ def _make_config(**kwargs):
         'weka_share_name_prefix': 'manila_',
         'weka_nfs_server': None,
         'share_backend_name': 'weka',
+        'weka_wekafs_isolation': True,
+        'weka_org_admin_secret': 'test-secret',
+        'weka_org_prefix': 'manila-',
+        'weka_org_user': 'manila',
+        'weka_auth_token_dir': '/var/lib/manila/weka-tokens',
     }
     defaults.update(kwargs)
 
@@ -96,6 +105,16 @@ class TestWekaShareDriverSetup(unittest.TestCase):
         drv.do_setup(context=None)
 
         mock_client.create_filesystem_group.assert_called_once_with('default')
+
+    @mock.patch('manila.share.drivers.weka.client.WekaApiClient')
+    def test_do_setup_isolation_requires_secret(self, mock_client_cls):
+        drv = self._make_driver(weka_org_admin_secret=None)
+        mock_client = mock.Mock()
+        mock_client.get_cluster_status.return_value = (
+            fakes.fake_cluster_status())
+        mock_client_cls.return_value = mock_client
+        self.assertRaises(
+            weka_exc.WekaConfigurationError, drv.do_setup, None)
 
     def test_check_for_setup_error_missing_required(self):
         drv = self._make_driver(weka_api_server=None)
@@ -240,6 +259,22 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
         drv._nfs_server = nfs_server
         return drv
 
+    def _make_iso_driver(self):
+        """Isolation-enabled driver; returns (drv, org_client mock)."""
+        drv = self._make_driver()
+        drv._wekafs_isolation = True
+        drv._org_prefix = 'manila-'
+        drv._org_user = 'manila'
+        drv._org_admin_secret = 'sekret'
+        drv._auth_token_dir = '/tmp/weka-tok-test'
+        drv._org_clients = {}
+        drv._org_lock = threading.Lock()
+        org_client = mock.Mock()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        drv._client.for_org.return_value = org_client
+        return drv, org_client
+
     def _setup_happy_path_client(self, drv):
         """Configure client mocks for a fully successful operation."""
         snap = fakes.fake_snapshot()
@@ -371,6 +406,59 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
                         fakes.FAKE_FS_NAME,
                         fakes.FAKE_NEW_FS_NAME)
 
+        mock_rsync.assert_called_once()
+
+    # ── Isolation-enabled create-from-snapshot ────────────────────────────
+
+    @mock.patch(_PATCH_THREAD)
+    def test_create_from_snapshot_isolation_uses_org_client(
+            self, mock_thread):
+        """Snapshot + fs lookups and fs creation go via the org client."""
+        drv, org_client = self._make_iso_driver()
+        org_client.get_snapshot_by_name.return_value = fakes.fake_snapshot()
+        org_client.get_filesystem.return_value = fakes.fake_filesystem()
+        org_client.get_filesystem_by_name.return_value = None
+        org_client.create_filesystem.return_value = (
+            fakes.fake_new_filesystem())
+
+        result = drv.create_share_from_snapshot(
+            None, self._new_share(proto='WEKAFS'),
+            fakes.fake_snapshot_model())
+
+        self.assertEqual(
+            constants.STATUS_CREATING_FROM_SNAPSHOT, result['status'])
+        org_client.get_snapshot_by_name.assert_called_once()
+        org_client.get_filesystem.assert_called_once()
+        _, kwargs = org_client.create_filesystem.call_args
+        self.assertTrue(kwargs.get('auth_required'))
+        # The admin client is never used for the isolated fs creation.
+        drv._client.create_filesystem.assert_not_called()
+        mock_thread.assert_called_once()
+
+    @mock.patch(_PATCH_RSYNC)
+    def test_copy_snapshot_wekafs_isolation_passes_auth_token(
+            self, mock_rsync):
+        """_copy_snapshot_wekafs mounts with the org's auth_token_path."""
+        drv, _ = self._make_iso_driver()
+        with mock.patch.object(
+                drv, '_org_token_file', return_value='/tmp/tok.json'):
+            with mock.patch(
+                    'manila.share.drivers.weka.driver.tempfile.mkdtemp',
+                    side_effect=['/tmp/weka_src', '/tmp/weka_dst']):
+                with mock.patch(
+                        'manila.share.drivers.weka.driver.weka_posix.'
+                        'WekaMount') as mock_mount:
+                    drv._copy_snapshot_wekafs(
+                        self._new_share(proto='WEKAFS'),
+                        fakes.fake_snapshot_model(),
+                        fakes.fake_snapshot(),
+                        fakes.FAKE_FS_NAME,
+                        fakes.FAKE_NEW_FS_NAME)
+
+        self.assertEqual(2, mock_mount.call_count)
+        for call in mock_mount.call_args_list:
+            self.assertEqual(
+                '/tmp/tok.json', call.kwargs.get('auth_token_path'))
         mock_rsync.assert_called_once()
 
     @mock.patch(_PATCH_SLEEP)
@@ -1645,6 +1733,216 @@ class TestWekaShareDriverEnsureShares(unittest.TestCase):
         self.assertEqual(
             constants.STATUS_ERROR,
             result[share['id']]['status'])
+
+
+class TestWekaShareDriverWekafsIsolation(unittest.TestCase):
+    """Per-tenant WEKAFS organization isolation."""
+
+    def _make_driver(self, isolation=True):
+        drv = weka_driver.WekaShareDriver.__new__(weka_driver.WekaShareDriver)
+        drv.configuration = _make_config()
+        drv._client = mock.Mock()
+        drv._fs_group_uid = fakes.FAKE_GROUP_UID
+        drv._wekafs_isolation = isolation
+        drv._org_prefix = 'manila-'
+        drv._org_user = 'manila'
+        drv._org_admin_secret = 'sekret'
+        drv._auth_token_dir = '/tmp/weka-tok-test'
+        drv._org_clients = {}
+        drv._org_lock = threading.Lock()
+        return drv
+
+    def _org_client(self, drv):
+        """Wire drv._client.for_org to return a fresh mock org client."""
+        org_client = mock.Mock()
+        drv._client.for_org.return_value = org_client
+        return org_client
+
+    def test_create_share_creates_org_and_authed_fs(self):
+        drv = self._make_driver()
+        # Organization does not exist yet.
+        drv._client.get_organization_by_name.return_value = None
+        drv._client.create_organization.return_value = (
+            fakes.fake_organization())
+        org_client = self._org_client(drv)
+        org_client.get_filesystem_by_name.return_value = None
+        org_client.create_filesystem.return_value = fakes.fake_filesystem()
+
+        share = fakes.fake_share(proto='WEKAFS')
+        result = drv.create_share(context=None, share=share)
+
+        # Org was created, and the FS went through the org client with
+        # authentication required — never through the admin client.
+        drv._client.create_organization.assert_called_once()
+        org_client.create_filesystem.assert_called_once()
+        _, kwargs = org_client.create_filesystem.call_args
+        self.assertTrue(kwargs.get('auth_required'))
+        drv._client.create_filesystem.assert_not_called()
+
+        meta = result[0]['metadata']
+        self.assertEqual('manila-projuuid5678', meta['weka_org_name'])
+        # Tenants log in as the least-privilege mount user, not the admin.
+        self.assertEqual('manila-mnt', meta['weka_org_user'])
+
+    def test_create_share_reuses_existing_org(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org_client = self._org_client(drv)
+        org_client.get_filesystem_by_name.return_value = None
+        org_client.create_filesystem.return_value = fakes.fake_filesystem()
+
+        drv.create_share(context=None, share=fakes.fake_share(proto='WEKAFS'))
+
+        # Existing org: no create_organization call.
+        drv._client.create_organization.assert_not_called()
+
+    def test_delete_share_retains_org(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org_client = self._org_client(drv)
+        org_client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+
+        with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
+                               return_value=False):
+            drv.delete_share(context=None,
+                             share=fakes.fake_share(proto='WEKAFS'))
+
+        org_client.delete_filesystem.assert_called_once()
+        # Org and its user are intentionally kept.
+        drv._client.delete_organization.assert_not_called()
+
+    def test_nfs_share_ignores_isolation(self):
+        drv = self._make_driver()
+        drv._client.get_filesystem_by_name.return_value = None
+        drv._client.create_filesystem.return_value = fakes.fake_filesystem()
+
+        result = drv.create_share(
+            context=None, share=fakes.fake_share(proto='NFS'))
+
+        # NFS uses the admin client, no org, no auth_required.
+        drv._client.create_organization.assert_not_called()
+        _, kwargs = drv._client.create_filesystem.call_args
+        self.assertFalse(kwargs.get('auth_required'))
+        self.assertNotIn('weka_org_name', result[0]['metadata'])
+
+    def test_isolation_off_uses_admin_client(self):
+        drv = self._make_driver(isolation=False)
+        drv._client.get_filesystem_by_name.return_value = None
+        drv._client.create_filesystem.return_value = fakes.fake_filesystem()
+
+        result = drv.create_share(
+            context=None, share=fakes.fake_share(proto='WEKAFS'))
+
+        drv._client.create_filesystem.assert_called_once()
+        _, kwargs = drv._client.create_filesystem.call_args
+        self.assertFalse(kwargs.get('auth_required'))
+        drv._client.for_org.assert_not_called()
+        self.assertNotIn('weka_org_name', result[0]['metadata'])
+
+    def test_update_access_returns_mount_credential(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org_client = self._org_client(drv)
+
+        share = fakes.fake_share(proto='WEKAFS')
+        rule = fakes.fake_access_rule(access_type='user', access_to='weka')
+        result = drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[rule], delete_rules=[],
+            update_rules=[])
+
+        entry = result[rule['access_id']]
+        self.assertEqual('active', entry['state'])
+        # Tenants receive the least-privilege mount password as access_key.
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            entry['access_key'])
+        # A Regular (mount-only) user was ensured in the org.
+        args, _ = org_client.create_user.call_args
+        self.assertEqual('Regular', args[1])
+
+    def test_update_access_no_key_when_isolation_off(self):
+        drv = self._make_driver(isolation=False)
+        share = fakes.fake_share(proto='WEKAFS')
+        rule = fakes.fake_access_rule(access_type='ip', access_to='10.0.0.1')
+        result = drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[rule], delete_rules=[],
+            update_rules=[])
+        entry = result[rule['access_id']]
+        self.assertEqual('active', entry['state'])
+        self.assertNotIn('access_key', entry)
+
+    def test_mount_password_differs_from_admin_password(self):
+        drv = self._make_driver()
+        pid = 'proj-x'
+        self.assertNotEqual(
+            drv._org_password(pid), drv._org_mount_password(pid))
+
+    def test_org_password_deterministic_and_complex(self):
+        drv = self._make_driver()
+        p1 = drv._org_password('proj-a')
+        p2 = drv._org_password('proj-a')
+        p3 = drv._org_password('proj-b')
+        self.assertEqual(p1, p2)
+        self.assertNotEqual(p1, p3)
+        self.assertGreaterEqual(len(p1), 8)
+        self.assertTrue(any(c.isupper() for c in p1))
+        self.assertTrue(any(c.islower() for c in p1))
+        self.assertTrue(any(c.isdigit() for c in p1))
+        self.assertTrue(any(not c.isalnum() for c in p1))
+
+    def test_org_name_prefixed_and_bounded(self):
+        drv = self._make_driver()
+        self.assertEqual(
+            'manila-projuuid5678', drv._org_name('proj-uuid-5678'))
+
+    def test_org_token_file_written_0600(self):
+        drv = self._make_driver()
+        tmpdir = tempfile.mkdtemp(prefix='weka-tok-test-')
+        drv._auth_token_dir = tmpdir
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org_client = self._org_client(drv)
+        org_client.auth_token_payload.return_value = {
+            'access_token': 'acc', 'refresh_token': 'ref',
+            'token_type': 'Bearer'}
+        try:
+            path = drv._org_token_file('proj-uuid-5678')
+            self.assertTrue(path.endswith('manila-projuuid5678.json'))
+            with open(path) as fh:
+                self.assertEqual('acc', json.load(fh)['access_token'])
+            self.assertEqual(0o600, os.stat(path).st_mode & 0o777)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_org_token_file_none_when_isolation_off(self):
+        drv = self._make_driver(isolation=False)
+        self.assertIsNone(drv._org_token_file('proj-uuid-5678'))
+
+    def test_isolated_wekafs_without_project_id_raises(self):
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='WEKAFS', project_id=None)
+        # Would otherwise collapse into a shared "manila-" org.
+        self.assertRaises(
+            weka_exc.WekaOrgError, drv._client_for_share, share)
+
+    def test_org_client_cached(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        self._org_client(drv)
+
+        c1 = drv._org_client('proj-1')
+        c2 = drv._org_client('proj-1')
+
+        self.assertIs(c1, c2)
+        # for_org (and thus login) only happens once per project.
+        drv._client.for_org.assert_called_once()
 
 
 if __name__ == '__main__':

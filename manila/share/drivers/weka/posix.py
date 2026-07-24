@@ -32,10 +32,13 @@ for example::
 
     mount -t wekafs -o num_cores=1 10.0.0.1,10.0.0.2/my_fs /mnt/weka/my_fs
 
-Stateless (auth_required) mount format adds a mount token::
+Authenticated (auth_required) mount format points at a token file::
 
-    mount -t wekafs -o num_cores=1,mount_token=<token> \\
+    mount -t wekafs -o num_cores=1,auth_token_path=/path/token.json \\
         10.0.0.1/auth_fs /mnt/weka/auth_fs
+
+where the token file is the JSON produced by ``weka user login``
+(``{"access_token": ..., "refresh_token": ..., "token_type": "Bearer"}``).
 """
 
 import os
@@ -80,7 +83,9 @@ class WekaMount(object):
     :param backends: Comma-separated string of Weka backend addresses.
     :param fs_name: Weka filesystem name to mount.
     :param mount_point: Local directory where the filesystem will be mounted.
-    :param mount_token: Optional authentication token for auth_required FSes.
+    :param auth_token_path: Optional path to a Weka auth-token JSON file,
+        required to mount filesystems created with authentication enabled
+        (auth_required). Produced by ``weka user login``.
     :param num_cores: Number of POSIX client CPU cores (default 1).
     :param net: Optional NIC name or DPDK identifier (e.g. "eth0").
     :param read_cache: Enable client-side read cache (default True).
@@ -91,7 +96,7 @@ class WekaMount(object):
     """
 
     def __init__(self, backends, fs_name, mount_point,
-                 mount_token=None,
+                 auth_token_path=None,
                  num_cores=1,
                  net=None,
                  read_cache=True,
@@ -102,7 +107,7 @@ class WekaMount(object):
         self.backends = backends
         self.fs_name = fs_name
         self.mount_point = mount_point
-        self.mount_token = mount_token
+        self.auth_token_path = auth_token_path
         self.num_cores = num_cores
         self.net = net
         self.read_cache = read_cache
@@ -301,8 +306,8 @@ class WekaMount(object):
         """Build the list of WekaFS mount options."""
         opts = []
         opts.append('num_cores={}'.format(self.num_cores))
-        if self.mount_token:
-            opts.append('mount_token={}'.format(self.mount_token))
+        if self.auth_token_path:
+            opts.append('auth_token_path={}'.format(self.auth_token_path))
         if self.net:
             opts.append('net={}'.format(self.net))
         if not self.read_cache:

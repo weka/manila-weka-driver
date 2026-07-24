@@ -172,40 +172,42 @@ for full installation instructions.
 
 **Description:**
 The Manila access-rules API (`share access create`) has no direct mapping
-onto the WekaFS (POSIX client) security model. For the WekaFS protocol,
-access control is managed entirely within the Weka cluster via:
+onto the WekaFS (POSIX client) security model. With per-tenant isolation
+enabled (`weka_wekafs_isolation=True`, the default), access control is
+managed at the Weka cluster level via per-org filesystem authentication
+(`auth_required=True`) and mount tokens scoped to the project's Weka
+organization (see
+[architecture.md §10](architecture.md#10-per-tenant-wekafs-isolation-via-weka-organizations)).
+When isolation is **disabled** (legacy mode), WEKAFS filesystems are
+created with authentication off and are mountable by any host that can
+reach the Weka fabric — there is no access control at all.
 
-- **Filesystem-level authentication** (`auth_required` flag) — forces
-  clients to present a valid Weka mount token before mounting.
-- **Mount tokens** — scoped credentials issued per-user or per-client
-  by the Weka cluster.
-- **Weka user accounts** — the cluster enforces per-user filesystem
-  permissions at the protocol level.
-
-These mechanisms have no equivalent in the Manila access-rules model
-(IP rules, user rules, etc.) and the driver does not currently implement
-a translation layer between them.
+Manila IP rules, user rules, etc. have no per-client equivalent in this
+model and the driver does not implement a translation layer for them.
 
 **Impact:**
 Any attempt to add or delete an access rule on a WEKAFS share will return
-an `error` state for the rule with a warning logged. The share itself
-remains available — only the rule operation is rejected. Example:
+an `active` state (the rule is accepted) but has no effect on who can
+mount the filesystem. Access is controlled entirely by whether the client
+holds a valid Weka org token. Example:
 
 ```
 $ openstack share access create my-wekafs-share ip 10.0.0.5
-# Rule will show status 'error'
+# Rule shows 'active' but does not grant mount access
 ```
 
 **Workaround:**
-Control access to WEKAFS shares at the network layer (VPC security groups,
-firewall rules) and via Weka cluster user management. Do not rely on Manila
-access rules for WEKAFS share security.
+Create a Manila access rule on the WEKAFS share.  The rule's
+`access_key` field carries the mount user's password (self-service,
+no operator step required).  See
+[Configuration Guide](configuration.md#self-service-credential-delivery-via-access_key)
+and [§10 below](#10-wekafs-mount-requires-weka-user-login-cli-step).
+Control network-layer access via VPC security groups or firewall rules.
 
 **Future work:**
 A future implementation could map Manila IP rules to Weka NFS-style client
 groups on the WekaFS mount path, or map user rules to Weka user account
-permissions. This requires a deeper integration with Weka's authentication
-API and is tracked as a future enhancement.
+permissions. This is tracked as a future enhancement.
 
 ---
 
@@ -277,3 +279,131 @@ through filesystem quotas and directory quotas. The driver reports
 Manila share types with QoS extra-specs (e.g. `max_iops`, `max_bandwidth`)
 cannot be enforced by this driver. All shares get equal access to the
 cluster's full performance.
+
+---
+
+## 10. WEKAFS Mount Requires `weka user login` (CLI Step)
+
+**Affects:** WEKAFS protocol shares with `weka_wekafs_isolation = true`
+(default).
+
+**Description:**
+WEKAFS filesystems are created with `auth_required=True` inside the
+project's Weka organization. A client cannot mount the share until it
+has used `weka user login` to obtain a token file and passed that file
+via the `auth_token_path` mount option.
+
+The driver now delivers the mount credential self-service: when a
+tenant creates a Manila access rule on a WEKAFS share, the rule's
+**access_key** field contains the Regular mount user's password
+(derived as `HMAC-SHA256(weka_org_admin_secret, project_id + ":mount")`).
+No operator or out-of-band secret distribution is required.
+
+**Impact:**
+Mounting a WEKAFS share is a two-step process that is not pure Manila —
+tenants must run a Weka CLI command (`weka user login`) in addition to
+the standard OpenStack workflow. This is a Weka platform requirement,
+not a Manila limitation.
+
+**Workflow:**
+```bash
+# 1. Create share and access rule; retrieve the mount credential
+openstack share create WEKAFS 100 --name myshare --share-type weka
+openstack share access create myshare user weka
+KEY=$(openstack share access list myshare \
+        -f value -c "Access Key" | head -1)
+
+# 2. Log in to the per-project Weka org
+#    weka_org_name and weka_org_user visible in export-location metadata
+weka user login manila-mnt "$KEY" --org <weka_org_name> -H <api-host>
+# Writes ~/.weka/auth-token.json
+
+# 3. Mount
+mount -t wekafs \
+    -o auth_token_path=~/.weka/auth-token.json \
+    <backend>/<fs_name> <mountpoint>
+```
+
+---
+
+## 11. Empty Weka Orgs Accumulate Over Time
+
+**Affects:** Deployments with `weka_wekafs_isolation = true` (default).
+
+**Description:**
+When a project's last WEKAFS share is deleted, the driver deletes the
+Weka filesystem but retains the Weka organization and its admin user.
+Orgs are never torn down automatically.
+
+**Impact:**
+Over time, projects that have had all their shares deleted leave behind
+empty Weka organizations. These do not affect cluster operation or
+capacity, but they accumulate in the Weka management UI and API response
+payloads.
+
+**Cleanup:**
+Identify empty orgs (no filesystems) in the Weka management console
+under **Organizations**. It is safe to delete any org matching the
+`weka_org_prefix` pattern (default `manila-`) that has no filesystems
+and does not correspond to an active Manila project.
+
+Via the Weka CLI:
+
+```bash
+weka org list
+weka org delete <org-name>
+```
+
+---
+
+## 12. Rotating `weka_org_admin_secret` Re-keys All Credentials
+
+**Affects:** Deployments with `weka_wekafs_isolation = true` (default).
+
+**Description:**
+Both per-org passwords are derived from `weka_org_admin_secret`:
+- TenantAdmin: `HMAC-SHA256(weka_org_admin_secret, project_id)`
+- Mount user:  `HMAC-SHA256(weka_org_admin_secret, project_id + ":mount")`
+
+If `weka_org_admin_secret` is rotated in `manila.conf`, the driver
+derives new passwords that no longer match those stored in the Weka
+cluster for existing orgs.
+
+**Impact:**
+- All subsequent driver operations on existing WEKAFS shares fail with
+  an authentication error (TenantAdmin password mismatch).
+- Tenants whose existing access rules carried the old mount credential
+  (via `access_key`) must re-fetch the new `access_key` and re-run
+  `weka user login` — their cached auth-token.json is invalid.
+
+**Recovery:**
+After rotating the secret, update both user passwords for each existing
+Weka org to match the new derived values, or delete and recreate all
+WEKAFS shares (destroys share data).  There is no automated migration
+path.  Rotating the secret is effectively a re-keying event for all
+tenants.
+
+---
+
+## 13. `manage_existing` Does Not Create or Move Weka Orgs
+
+**Affects:** `manage_existing` for WEKAFS protocol shares with
+`weka_wekafs_isolation = true` (default).
+
+**Description:**
+When an existing Weka filesystem is adopted via `manage_existing`, the
+driver brings the share under Manila management using the root-org
+session (the credentials in `weka_username`/`weka_password`/
+`weka_organization`).  It does not create a per-project Weka org for
+the adopted share and does not move the filesystem into one.
+
+**Impact:**
+Adopted WEKAFS shares do not benefit from per-tenant org isolation.
+They are accessible to any client that can reach the Weka cluster root
+org, which may not match the isolation expectations for the owning
+Manila project.
+
+**Workaround:**
+Avoid using `manage_existing` for WEKAFS shares in isolated deployments.
+Create shares through Manila from the start so the driver provisions
+them inside the correct project org.
