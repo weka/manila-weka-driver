@@ -249,6 +249,12 @@ source "${DEVSTACK_DIR}/functions"
 { set +x; } 2>/dev/null
 iniset /etc/manila/manila.conf weka_nfs    weka_password "$WEKA_PASSWORD"
 iniset /etc/manila/manila.conf weka_wekafs weka_password "$WEKA_PASSWORD"
+# weka_org_admin_secret is mandatory (WEKAFS per-tenant isolation is
+# always on). It is an HMAC key chosen by the operator to derive per-org
+# credentials, not a pre-existing cluster credential, so a stable
+# CI-local value is fine; override with $WEKA_ORG_ADMIN_SECRET if set.
+iniset /etc/manila/manila.conf weka_nfs    weka_org_admin_secret "${WEKA_ORG_ADMIN_SECRET:-ci-only-weka-org-hmac}"
+iniset /etc/manila/manila.conf weka_wekafs weka_org_admin_secret "${WEKA_ORG_ADMIN_SECRET:-ci-only-weka-org-hmac}"
 set -u
 
 # ── Point manila at the live Weka NFS gateway ─────────────────────────────────

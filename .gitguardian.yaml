@@ -1,0 +1,11 @@
+# GitGuardian configuration.
+#
+# tests/unit/test_client.py contains only hard-coded, obviously-fake
+# credentials (e.g. "FakePass1!") used to assert request bodies against a
+# mocked HTTP session -- they are not real secrets. Ignore GitGuardian's
+# generic username-password detector for this test file so it does not
+# report false positives on every PR.
+version: 2
+secret:
+  ignored-paths:
+    - tests/unit/test_client.py

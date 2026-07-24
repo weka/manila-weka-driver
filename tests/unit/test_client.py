@@ -513,5 +513,94 @@ class TestWekaApiClientSDKStubs(unittest.TestCase):
             self.client.delete_client_group('cg-1')
 
 
+class TestWekaApiClientOrganizations(unittest.TestCase):
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def test_list_organizations(self):
+        orgs = [fakes.fake_organization()]
+        resp = _make_response(200, {'data': orgs})
+        with mock.patch.object(self.client._session, 'request',
+                               return_value=resp):
+            result = self.client.list_organizations()
+        self.assertEqual(orgs, result)
+
+    def test_get_organization_by_name_found(self):
+        orgs = [fakes.fake_organization(name='manila-proj')]
+        with mock.patch.object(self.client, 'list_organizations',
+                               return_value=orgs):
+            result = self.client.get_organization_by_name('manila-proj')
+        self.assertEqual('manila-proj', result['name'])
+
+    def test_get_organization_by_name_not_found(self):
+        with mock.patch.object(self.client, 'list_organizations',
+                               return_value=[]):
+            result = self.client.get_organization_by_name('missing')
+        self.assertIsNone(result)
+
+    def test_create_organization_sends_name_user_password(self):
+        org = fakes.fake_organization(name='manila-proj')
+        captured = {}
+
+        def check(method, url, **kwargs):
+            captured['method'] = method
+            captured['json'] = kwargs.get('json')
+            return _make_response(200, {'data': org})
+
+        with mock.patch.object(self.client._session, 'request',
+                               side_effect=check):
+            result = self.client.create_organization(
+                'manila-proj', 'manila', 'FakePass1!')
+        self.assertEqual(org, result)
+        self.assertEqual('POST', captured['method'])
+        self.assertEqual(
+            {'name': 'manila-proj', 'username': 'manila',
+             'password': 'FakePass1!'},
+            captured['json'])
+
+    def test_delete_organization(self):
+        resp = _make_response(200, {})
+        resp.content = b''
+        with mock.patch.object(self.client._session, 'request',
+                               return_value=resp):
+            self.client.delete_organization(fakes.FAKE_ORG_UID)
+
+    def test_create_user_sends_role(self):
+        user = fakes.fake_user(role='Regular')
+        captured = {}
+
+        def check(method, url, **kwargs):
+            captured['json'] = kwargs.get('json')
+            return _make_response(200, {'data': user})
+
+        with mock.patch.object(self.client._session, 'request',
+                               side_effect=check):
+            result = self.client.create_user(
+                'mountuser', 'Regular', 'Pw1!aaaa')
+        self.assertEqual(user, result)
+        self.assertEqual('Regular', captured['json']['role'])
+
+    def test_auth_token_payload(self):
+        self.client._access_token = 'acc'
+        self.client._refresh_token = 'ref'
+        payload = self.client.auth_token_payload()
+        self.assertEqual('acc', payload['access_token'])
+        self.assertEqual('ref', payload['refresh_token'])
+        self.assertEqual('Bearer', payload['token_type'])
+
+    def test_for_org_builds_logged_in_client(self):
+        with mock.patch.object(weka_client.WekaApiClient, 'login') as login:
+            org_client = self.client.for_org(
+                'manila-proj', 'manila', 'FakePass1!')
+        self.assertIsInstance(org_client, weka_client.WekaApiClient)
+        self.assertEqual('manila-proj', org_client._organization)
+        self.assertEqual('manila', org_client._username)
+        login.assert_called_once()
+
+
 if __name__ == '__main__':
     unittest.main()

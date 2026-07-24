@@ -97,3 +97,8 @@ class WekaCapacityError(WekaException):
 class WekaConfigurationError(WekaException):
     """Raised when the driver configuration is invalid."""
     message = _("Weka driver configuration error: %(reason)s")
+
+
+class WekaOrgError(WekaException):
+    """Raised when per-tenant organization provisioning fails."""
+    message = _("Weka organization error: %(reason)s")

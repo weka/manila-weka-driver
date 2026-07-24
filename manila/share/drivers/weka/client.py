@@ -86,6 +86,10 @@ class WekaApiClient(object):
         self._ssl_verify = ssl_verify
         self._timeout = timeout
         self._max_retries = max_retries
+        # Retained so for_org() can spawn org-scoped clients that reuse
+        # the same connection-pool sizing.
+        self._pool_connections = pool_connections
+        self._pool_maxsize = pool_maxsize
 
         self._base_url = 'https://{host}:{port}{api}'.format(
             host=host, port=port, api=_API_V2)
@@ -285,12 +289,124 @@ class WekaApiClient(object):
             LOG.debug("Token refresh failed — performing full login")
             self._do_login()
 
+    def for_org(self, organization, username, password):
+        """Return a new client authenticated to a specific organization.
+
+        Shares this client's connection settings (host, port, TLS,
+        timeouts, pool sizes) but logs in as *username* in
+        *organization*.  Used by the driver to operate inside a
+        per-tenant organization for WEKAFS isolation, because Weka binds
+        filesystem operations to the authenticated session's org rather
+        than to a request field.
+
+        :raises WekaAuthError: if the org login fails.
+        """
+        client = WekaApiClient(
+            host=self._host,
+            username=username,
+            password=password,
+            organization=organization,
+            port=self._port,
+            ssl_verify=self._ssl_verify,
+            timeout=self._timeout,
+            max_retries=self._max_retries,
+            pool_connections=self._pool_connections,
+            pool_maxsize=self._pool_maxsize,
+        )
+        client.login()
+        return client
+
+    def auth_token_payload(self):
+        """Return the current tokens as a Weka mount-token file payload.
+
+        The dict matches the JSON produced by ``weka user login`` and is
+        written to disk for use as a WekaFS ``auth_token_path`` mount
+        option.
+        """
+        return {
+            'access_token': self._access_token,
+            'refresh_token': self._refresh_token,
+            'token_type': 'Bearer',
+        }
+
     def get_cluster_status(self):
         """Return cluster status dict (name, version, health).
 
         Weka 5.x: GET /cluster  (replaces the old GET /status endpoint)
         """
         return self._get('/cluster')
+
+    # ------------------------------------------------------------------
+    # Organization / user methods (per-tenant WEKAFS isolation)
+    # ------------------------------------------------------------------
+
+    def list_organizations(self):
+        """Return all organizations (tenants).
+
+        GET /organizations
+        """
+        result = self._get('/organizations')
+        return result.get('data', result)
+
+    def get_organization_by_name(self, name):
+        """Find an organization by name; returns None if not found."""
+        for org in self.list_organizations():
+            if org.get('name') == name:
+                return org
+        return None
+
+    def create_organization(self, name, username, password,
+                            ssd_quota=None, total_quota=None):
+        """Create an organization (tenant) and its admin user.
+
+        POST /organizations
+
+        Weka creates the organization together with its initial
+        organization-admin user in a single call; *username* and
+        *password* become that admin's credentials (used later to log
+        in to the org and manage its filesystems).
+
+        :returns: Created organization dict (includes 'uid' and 'id').
+        """
+        payload = {
+            'name': name,
+            'username': username,
+            'password': password,
+        }
+        if ssd_quota is not None:
+            payload['ssd_quota'] = ssd_quota
+        if total_quota is not None:
+            payload['total_quota'] = total_quota
+        result = self._post('/organizations', json=payload)
+        return result.get('data', result)
+
+    def delete_organization(self, org_uid):
+        """Delete an organization and all of its users.
+
+        DELETE /organizations/{uid}
+        """
+        return self._delete(
+            '/organizations/{uid}'.format(uid=org_uid))
+
+    def create_user(self, username, role, password):
+        """Create a user in the currently authenticated organization.
+
+        POST /users
+
+        The organization is taken from this client's authenticated
+        session (Weka has no per-request org field), so call this on an
+        org-scoped client (see for_org()).
+
+        :param role: Weka role, capitalized — one of 'ClusterAdmin',
+            'TenantAdmin', 'ReadOnly', 'Regular', 'S3', 'CSI'.
+        """
+        payload = {
+            'username': username,
+            'role': role,
+            'password': password,
+        }
+        result = self._post('/users', json=payload)
+        return result.get('data', result)
 
     # ------------------------------------------------------------------
     # Filesystem methods
