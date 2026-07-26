@@ -1907,6 +1907,32 @@ class TestWekaShareDriverWekafsIsolation(unittest.TestCase):
         args, _ = org_client.create_user.call_args
         self.assertEqual('Regular', args[1])
 
+    def test_update_access_mount_user_already_exists_is_idempotent(self):
+        # Second+ share in a project: the org mount user already exists,
+        # and Weka rejects re-creation with a 400 "Username already in
+        # use." update_access must tolerate it and still return the
+        # mount credential (not error the access rule).
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org_client = self._org_client(drv)
+        org_client.create_user.side_effect = weka_exc.WekaApiError(
+            status_code=400,
+            reason='/users: Could not create user: Username already in use.')
+
+        share = fakes.fake_share(proto='WEKAFS')
+        rule = fakes.fake_access_rule(access_type='user', access_to='weka')
+        result = drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[rule], delete_rules=[],
+            update_rules=[])
+
+        entry = result[rule['access_id']]
+        self.assertEqual('active', entry['state'])
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            entry['access_key'])
+
     def test_mount_password_differs_from_admin_password(self):
         drv = self._make_driver()
         pid = 'proj-x'
@@ -2843,21 +2869,41 @@ class TestCreateFilesystemIdempotentEdgeCases(unittest.TestCase):
 
 
 class TestIsAlreadyExistsError(unittest.TestCase):
-    """Cover _is_already_exists_error (line 140)."""
+    """Cover _is_already_exists_error."""
 
     def test_weka_conflict_returns_true(self):
-        """Line 140: WekaConflict always returns True."""
+        """WekaConflict always returns True."""
         exc = weka_exc.WekaConflict(reason='conflict')
         self.assertTrue(weka_driver._is_already_exists_error(exc))
 
-    def test_already_exist_string_returns_true(self):
-        """Line 141: 'already exist' substring returns True."""
+    def test_non_api_error_returns_false(self):
+        """A non-WekaApiError is never an 'already exists' condition."""
         exc = Exception('Rule already exists in group')
+        self.assertFalse(weka_driver._is_already_exists_error(exc))
+
+    def test_already_exist_string_400_returns_true(self):
+        """400 with 'already exist' substring returns True."""
+        exc = weka_exc.WekaApiError(
+            status_code=400, reason='Rule already exists in group')
         self.assertTrue(weka_driver._is_already_exists_error(exc))
 
+    def test_already_in_use_string_400_returns_true(self):
+        """400 with 'already in use' (duplicate user) returns True."""
+        exc = weka_exc.WekaApiError(
+            status_code=400,
+            reason='Could not create user: Username already in use.')
+        self.assertTrue(weka_driver._is_already_exists_error(exc))
+
+    def test_matching_phrase_wrong_status_returns_false(self):
+        """The phrase is ignored outside the 400/409 status codes."""
+        exc = weka_exc.WekaApiError(
+            status_code=500, reason='backend already exists failure')
+        self.assertFalse(weka_driver._is_already_exists_error(exc))
+
     def test_other_error_returns_false(self):
-        """Line 141: unrelated message returns False."""
-        exc = Exception('permission denied')
+        """A 400 with an unrelated message returns False."""
+        exc = weka_exc.WekaApiError(
+            status_code=400, reason='permission denied')
         self.assertFalse(weka_driver._is_already_exists_error(exc))
 
 

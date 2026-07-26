@@ -574,9 +574,13 @@ class TestWekaApiClientOrganizations(unittest.TestCase):
                 'manila-proj', 'manila', 'FakePass1!')
         self.assertEqual(org, result)
         self.assertEqual('POST', captured['method'])
+        # Netspace mount enforcement is disabled at creation: the tenant
+        # has no network space and relies on per-FS auth tokens, so the
+        # cluster default (enforced) would reject every mount.
         self.assertEqual(
             {'name': 'manila-proj', 'username': 'manila',
-             'password': 'FakePass1!'},
+             'password': 'FakePass1!',
+             'enforce_mount_netspace_access': False},
             captured['json'])
 
     def test_delete_organization(self):

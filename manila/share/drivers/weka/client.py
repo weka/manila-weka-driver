@@ -356,7 +356,8 @@ class WekaApiClient(object):
         return None
 
     def create_organization(self, name, username, password,
-                            ssd_quota=None, total_quota=None):
+                            ssd_quota=None, total_quota=None,
+                            enforce_mount_netspace_access=False):
         """Create an organization (tenant) and its admin user.
 
         POST /organizations
@@ -366,12 +367,19 @@ class WekaApiClient(object):
         *password* become that admin's credentials (used later to log
         in to the org and manage its filesystems).
 
+        Network-space mount enforcement is disabled by default. Weka's
+        REST default enforces it, but the driver's tenants have no
+        network space attached and rely on per-filesystem auth tokens
+        for isolation — leaving it on rejects every mount into the
+        tenant ("Tenant N has no network spaces attached").
+
         :returns: Created organization dict (includes 'uid' and 'id').
         """
         payload = {
             'name': name,
             'username': username,
             'password': password,
+            'enforce_mount_netspace_access': enforce_mount_netspace_access,
         }
         if ssd_quota is not None:
             payload['ssd_quota'] = ssd_quota
