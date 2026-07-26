@@ -245,6 +245,23 @@ class TestWekaApiClientFilesystems(unittest.TestCase):
             result = self.client.delete_filesystem(fakes.FAKE_FS_UID)
         self.assertEqual({}, result)
 
+    def test_delete_filesystem_purge_from_obs(self):
+        """purge_from_obs=True is forwarded as a query param."""
+        resp = _make_response(200, {})
+        resp.content = b''
+        captured = {}
+
+        def check(method, url, **kwargs):
+            captured['params'] = kwargs.get('params')
+            return resp
+
+        with mock.patch.object(self.client._session, 'request',
+                               side_effect=check):
+            result = self.client.delete_filesystem(
+                fakes.FAKE_FS_UID, purge_from_obs=True)
+        self.assertEqual({}, result)
+        self.assertTrue(captured['params'].get('purge_from_obs'))
+
     def test_get_filesystem_by_name_found(self):
         fs_list = [fakes.fake_filesystem()]
         with mock.patch.object(self.client, 'list_filesystems',
@@ -600,6 +617,461 @@ class TestWekaApiClientOrganizations(unittest.TestCase):
         self.assertEqual('manila-proj', org_client._organization)
         self.assertEqual('manila', org_client._username)
         login.assert_called_once()
+
+
+class TestWekaApiClientRetry(unittest.TestCase):
+    """Test retry/backoff paths in _request."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=2)
+        self.client._access_token = 'tok'
+
+    def test_retry_5xx_logs_warning_and_succeeds(self):
+        """5xx triggers retry with LOG.warning; succeeds on last attempt."""
+        err_resp = _make_response(500, {'message': 'server error'})
+        ok_resp = _make_response(200, {'data': []})
+        with mock.patch.object(
+                self.client._session, 'request',
+                side_effect=[err_resp, ok_resp]):
+            with mock.patch('time.sleep'):
+                result = self.client._request('GET', '/fileSystems')
+        self.assertEqual(ok_resp, result)
+
+    def test_retry_5xx_exhausted_raises(self):
+        """5xx on all attempts raises WekaApiError after max_retries."""
+        err_resp = _make_response(503, {'message': 'unavailable'})
+        with mock.patch.object(
+                self.client._session, 'request',
+                return_value=err_resp):
+            with mock.patch('time.sleep'):
+                self.assertRaises(
+                    weka_exc.WekaApiError,
+                    self.client._request, 'GET', '/fileSystems')
+
+
+class TestWekaApiClientDelete(unittest.TestCase):
+    """Test _delete helper branches."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def test_delete_with_content_returns_json(self):
+        """_delete returns parsed JSON when response has a body."""
+        resp = _make_response(200, {'deleted': True})
+        resp.content = b'{"deleted": true}'
+        with mock.patch.object(self.client._session, 'request',
+                               return_value=resp):
+            result = self.client._delete('/fileSystems/uid-1')
+        self.assertEqual({'deleted': True}, result)
+
+    def test_delete_with_content_malformed_json_returns_empty(self):
+        """_delete falls back to {} when body is non-JSON."""
+        resp = mock.Mock()
+        resp.status_code = 200
+        resp.content = b'not-json'
+        resp.json.side_effect = ValueError('bad json')
+        resp.text = 'not-json'
+        with mock.patch.object(self.client._session, 'request',
+                               return_value=resp):
+            result = self.client._delete('/fileSystems/uid-1')
+        self.assertEqual({}, result)
+
+    def test_delete_no_content_returns_empty(self):
+        """_delete returns {} when response body is empty."""
+        resp = _make_response(200, {})
+        resp.content = b''
+        with mock.patch.object(self.client._session, 'request',
+                               return_value=resp):
+            result = self.client._delete('/fileSystems/uid-1')
+        self.assertEqual({}, result)
+
+
+class TestWekaApiClientPatch(unittest.TestCase):
+    """Test _patch helper."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def test_patch_sends_patch_method(self):
+        """_patch calls the API with method PATCH."""
+        resp = _make_response(200, {'data': {'ok': True}})
+
+        def check(method, url, **kwargs):
+            self.assertEqual('PATCH', method)
+            return resp
+
+        with mock.patch.object(self.client._session, 'request',
+                               side_effect=check):
+            result = self.client._patch('/some/resource', json={'x': 1})
+        self.assertEqual({'ok': True}, result.get('data'))
+
+
+class TestWekaApiClientRefreshFallback(unittest.TestCase):
+    """Test _refresh_or_login exception fallback branch."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+        self.client._refresh_token = 'bad-refresh'
+
+    def test_refresh_post_exception_falls_back_to_login(self):
+        """Network error during refresh POST causes fallback to full login."""
+        with mock.patch.object(
+                self.client._session, 'post',
+                side_effect=Exception('connection error')):
+            with mock.patch.object(self.client, '_do_login') as do_login:
+                self.client._refresh_or_login()
+        do_login.assert_called_once()
+
+
+class TestCreateOrganizationOptionalKwargs(unittest.TestCase):
+    """Test optional quota params in create_organization."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def test_create_organization_with_ssd_quota(self):
+        """ssd_quota appears in request body when provided."""
+        captured = {}
+
+        def check(method, url, **kwargs):
+            captured['json'] = kwargs.get('json')
+            return _make_response(200, {'data': {'name': 'org1'}})
+
+        with mock.patch.object(self.client._session, 'request',
+                               side_effect=check):
+            self.client.create_organization(
+                'org1', 'u', 'p', ssd_quota=500)
+        self.assertEqual(500, captured['json']['ssd_quota'])
+        self.assertNotIn('total_quota', captured['json'])
+
+    def test_create_organization_with_total_quota(self):
+        """total_quota appears in request body when provided."""
+        captured = {}
+
+        def check(method, url, **kwargs):
+            captured['json'] = kwargs.get('json')
+            return _make_response(200, {'data': {'name': 'org1'}})
+
+        with mock.patch.object(self.client._session, 'request',
+                               side_effect=check):
+            self.client.create_organization(
+                'org1', 'u', 'p', total_quota=1000)
+        self.assertEqual(1000, captured['json']['total_quota'])
+        self.assertNotIn('ssd_quota', captured['json'])
+
+
+class TestCreateFilesystemOptionalKwargs(unittest.TestCase):
+    """Test optional params in create_filesystem."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def _capture_post(self):
+        captured = {}
+
+        def check(method, url, **kwargs):
+            captured['json'] = kwargs.get('json')
+            return _make_response(200, {'data': {'name': 'fs1'}})
+
+        return mock.patch.object(
+            self.client._session, 'request', side_effect=check), captured
+
+    def test_create_filesystem_with_ssd_capacity(self):
+        """ssd_capacity included in payload when provided."""
+        patch, captured = self._capture_post()
+        with patch:
+            self.client.create_filesystem(
+                'fs1', 'grp1', 10 * 1024 ** 3,
+                ssd_capacity=5 * 1024 ** 3)
+        self.assertEqual(5 * 1024 ** 3, captured['json']['ssd_capacity'])
+
+    def test_create_filesystem_with_obs_buckets(self):
+        """obs_buckets included in payload when provided."""
+        patch, captured = self._capture_post()
+        with patch:
+            self.client.create_filesystem(
+                'fs1', 'grp1', 10 * 1024 ** 3,
+                obs_buckets=['bucket-uid-1'])
+        self.assertEqual(['bucket-uid-1'], captured['json']['obs_buckets'])
+
+    def test_create_filesystem_with_data_reduction(self):
+        """data_reduction included in payload when provided."""
+        patch, captured = self._capture_post()
+        with patch:
+            self.client.create_filesystem(
+                'fs1', 'grp1', 10 * 1024 ** 3,
+                data_reduction=True)
+        self.assertTrue(captured['json']['data_reduction'])
+
+
+class TestUpdateFilesystemOptionalKwargs(unittest.TestCase):
+    """Test optional params in update_filesystem."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def _capture_put(self):
+        captured = {}
+
+        def check(method, url, **kwargs):
+            captured['json'] = kwargs.get('json')
+            return _make_response(200, {'data': {'uid': 'fs-1'}})
+
+        return mock.patch.object(
+            self.client._session, 'request', side_effect=check), captured
+
+    def test_update_filesystem_with_name(self):
+        """name appears in PUT payload."""
+        patch, captured = self._capture_put()
+        with patch:
+            self.client.update_filesystem('fs-1', name='new-name')
+        self.assertEqual('new-name', captured['json']['name'])
+
+    def test_update_filesystem_with_ssd_capacity(self):
+        """ssd_capacity appears in PUT payload."""
+        patch, captured = self._capture_put()
+        with patch:
+            self.client.update_filesystem('fs-1', ssd_capacity=1024)
+        self.assertEqual(1024, captured['json']['ssd_capacity'])
+
+    def test_update_filesystem_with_auth_required(self):
+        """auth_required appears in PUT payload."""
+        patch, captured = self._capture_put()
+        with patch:
+            self.client.update_filesystem('fs-1', auth_required=True)
+        self.assertTrue(captured['json']['auth_required'])
+
+    def test_update_filesystem_with_data_reduction(self):
+        """data_reduction appears in PUT payload."""
+        patch, captured = self._capture_put()
+        with patch:
+            self.client.update_filesystem('fs-1', data_reduction=False)
+        self.assertFalse(captured['json']['data_reduction'])
+
+
+class TestGetFilesystemGroup(unittest.TestCase):
+    """Test get_filesystem_group."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def test_get_filesystem_group(self):
+        """get_filesystem_group returns data for a UID."""
+        grp = {'uid': 'grp-1', 'name': 'default'}
+        resp = _make_response(200, {'data': grp})
+        with mock.patch.object(self.client._session, 'request',
+                               return_value=resp):
+            result = self.client.get_filesystem_group('grp-1')
+        self.assertEqual(grp, result)
+
+
+class TestCreateFilesystemGroupOptionalKwargs(unittest.TestCase):
+    """Test optional params in create_filesystem_group."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def _capture_post(self):
+        captured = {}
+
+        def check(method, url, **kwargs):
+            captured['json'] = kwargs.get('json')
+            return _make_response(200, {'data': {'name': 'grp1'}})
+
+        return mock.patch.object(
+            self.client._session, 'request', side_effect=check), captured
+
+    def test_create_filesystem_group_with_target_ssd_retention(self):
+        """target_ssd_retention in payload when provided."""
+        patch, captured = self._capture_post()
+        with patch:
+            self.client.create_filesystem_group(
+                'grp1', target_ssd_retention=86400)
+        self.assertEqual(86400, captured['json']['target_ssd_retention'])
+
+    def test_create_filesystem_group_with_start_demote(self):
+        """start_demote in payload when provided."""
+        patch, captured = self._capture_post()
+        with patch:
+            self.client.create_filesystem_group('grp1', start_demote=10)
+        self.assertEqual(10, captured['json']['start_demote'])
+
+
+class TestCreateNfsPermissionOptionalKwargs(unittest.TestCase):
+    """Test optional params in create_nfs_permission."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def _capture_post(self):
+        captured = {}
+
+        def check(method, url, **kwargs):
+            captured['json'] = kwargs.get('json')
+            return _make_response(200, {'data': {'uid': 'perm-1'}})
+
+        return mock.patch.object(
+            self.client._session, 'request', side_effect=check), captured
+
+    def test_create_nfs_permission_with_squash(self):
+        """root_squashing in payload when squash is provided."""
+        patch, captured = self._capture_post()
+        with patch:
+            self.client.create_nfs_permission(
+                'cg1', 'fs1', '/', squash='root')
+        self.assertEqual('root', captured['json']['root_squashing'])
+
+    def test_create_nfs_permission_with_anon_uid(self):
+        """anon_uid in payload when provided."""
+        patch, captured = self._capture_post()
+        with patch:
+            self.client.create_nfs_permission(
+                'cg1', 'fs1', '/', anon_uid=65534)
+        self.assertEqual(65534, captured['json']['anon_uid'])
+
+    def test_create_nfs_permission_with_anon_gid(self):
+        """anon_gid in payload when provided."""
+        patch, captured = self._capture_post()
+        with patch:
+            self.client.create_nfs_permission(
+                'cg1', 'fs1', '/', anon_gid=65534)
+        self.assertEqual(65534, captured['json']['anon_gid'])
+
+
+class TestDeleteClientGroup(unittest.TestCase):
+    """Test delete_client_group error-handling paths."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def test_delete_client_group_rule(self):
+        """delete_client_group_rule issues DELETE to the rule endpoint."""
+        resp = _make_response(200, {})
+        resp.content = b''
+        with mock.patch.object(self.client._session, 'request',
+                               return_value=resp) as req_mock:
+            self.client.delete_client_group_rule('cg-1', 'rule-1')
+        url = req_mock.call_args[0][1]
+        self.assertIn('cg-1', url)
+        self.assertIn('rule-1', url)
+
+    def test_delete_client_group_with_rules(self):
+        """Rules are deleted before group; errors are suppressed."""
+        cg = {'uid': 'cg-1', 'name': 'grp',
+              'rules': [{'uid': 'r-1'}, {'uid': 'r-2'}]}
+        with mock.patch.object(self.client, 'get_client_group',
+                               return_value=cg):
+            with mock.patch.object(
+                    self.client, 'delete_client_group_rule') as del_rule:
+                with mock.patch.object(self.client._session, 'request',
+                                       return_value=_make_response(
+                                           200, {})) as req_mock:
+                    req_mock.return_value.content = b''
+                    self.client.delete_client_group('cg-1')
+        self.assertEqual(2, del_rule.call_count)
+
+    def test_delete_client_group_rule_error_suppressed(self):
+        """Rule deletion error does not propagate; group delete proceeds."""
+        cg = {'uid': 'cg-1', 'name': 'grp', 'rules': [{'uid': 'r-1'}]}
+        resp = _make_response(200, {})
+        resp.content = b''
+        with mock.patch.object(self.client, 'get_client_group',
+                               return_value=cg):
+            with mock.patch.object(
+                    self.client, 'delete_client_group_rule',
+                    side_effect=Exception('rule del failed')):
+                with mock.patch.object(self.client._session, 'request',
+                                       return_value=resp):
+                    result = self.client.delete_client_group('cg-1')
+        self.assertEqual({}, result)
+
+    def test_delete_client_group_get_error_suppressed(self):
+        """get_client_group error is suppressed; final DELETE still runs."""
+        resp = _make_response(200, {})
+        resp.content = b''
+        with mock.patch.object(self.client, 'get_client_group',
+                               side_effect=Exception('not found')):
+            with mock.patch.object(self.client._session, 'request',
+                                   return_value=resp):
+                result = self.client.delete_client_group('cg-1')
+        self.assertEqual({}, result)
+
+
+class TestGetCapacityFallback(unittest.TestCase):
+    """Test get_capacity /drives fallback for Weka 5.x."""
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def test_get_capacity_falls_back_to_drives(self):
+        """get_capacity computes totals from /drives when /capacity fails."""
+        drives = [
+            {'size_bytes': 1000, 'percentage_used': 50},
+            {'size_bytes': 2000, 'percentage_used': 25},
+        ]
+        drives_resp = _make_response(200, {'data': drives})
+
+        def _get_side_effect(path, params=None):
+            if path == '/capacity':
+                raise weka_exc.WekaNotFound(reason='not found')
+            if path == '/drives':
+                return drives_resp.json()
+            raise AssertionError('unexpected path: ' + path)
+
+        with mock.patch.object(self.client, '_get',
+                               side_effect=_get_side_effect):
+            result = self.client.get_capacity()
+        self.assertEqual(3000, result['totalBytes'])
+        self.assertEqual(500 + 500, result['usedBytes'])
+
+    def test_get_capacity_drives_not_list_returns_empty(self):
+        """get_capacity returns {} when /drives returns non-list data."""
+        def _get_side_effect(path, params=None):
+            if path == '/capacity':
+                raise weka_exc.WekaNotFound(reason='not found')
+            if path == '/drives':
+                return {'error': 'unexpected'}
+            raise AssertionError('unexpected path: ' + path)
+
+        with mock.patch.object(self.client, '_get',
+                               side_effect=_get_side_effect):
+            result = self.client.get_capacity()
+        self.assertEqual({}, result)
 
 
 if __name__ == '__main__':

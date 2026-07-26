@@ -38,7 +38,7 @@ manila-weka-driver/
 │   ├── api-mapping.md
 │   └── known-issues.md
 ├── .github/workflows/            # GitHub Actions CI/CD
-│   ├── ci.yml                    # Lint + coverage (85% threshold)
+│   ├── ci.yml                    # Lint + coverage (100% threshold)
 │   ├── unit-tests.yml            # Unit test matrix
 │   └── release.yml               # Tag-based release
 ├── tox.ini                       # Test environments
@@ -57,9 +57,9 @@ pytest tests/unit/ -v
 # Linting (OpenStack Hacking rules, 79 char line limit)
 tox -e pep8
 
-# Coverage (85% threshold)
+# Coverage (100% threshold on the driver package)
 tox -e cover
-pytest --cov=manila/share/drivers/weka --cov-fail-under=85
+pytest --cov=manila/share/drivers/weka --cov-fail-under=100
 
 # Run specific test
 pytest tests/unit/test_driver.py::TestWekaShareDriver::test_create_share -v
