@@ -135,10 +135,23 @@ def _is_already_exists_error(exc):
     conflict or a 400 whose message says the rule already exists; a
     single IP can also be stored in a normalized CIDR/mask form that
     our local de-dup check misses, so we rely on the error itself.
+    Duplicate user creation is a 400 phrased differently ("Could not
+    create user: Username already in use."), so match that wording too
+    — the org mount user is re-created on every WEKAFS access rule and
+    must be idempotent past the first share in a project.
+
+    The message match is gated on the duplicate/existence status codes
+    (400 Bad Request / 409 Conflict) so an unrelated error that happens
+    to contain the phrase is not silently swallowed.
     """
     if isinstance(exc, weka_exc.WekaConflict):
         return True
-    return 'already exist' in str(exc).lower()
+    if not isinstance(exc, weka_exc.WekaApiError):
+        return False
+    if exc.status_code not in (400, 409):
+        return False
+    msg = str(exc).lower()
+    return 'already exist' in msg or 'already in use' in msg
 
 
 def _is_ipv6(access_to):
