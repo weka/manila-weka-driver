@@ -1146,6 +1146,11 @@ class WekaShareDriver(driver.ShareDriver):
         their own mount token via ``weka user login`` without an operator
         handing them a secret.
         The org's TenantAdmin credential is never exposed.
+
+        The rule's ``access_level`` (ro/rw) is not honored: the mount
+        user is always a ``Regular`` role and the same access_key is
+        returned regardless, so an ``ro`` rule still grants read-write
+        access. See docs/known-issues.md #6.
         """
         rule_state_map = {}
         access_key = None

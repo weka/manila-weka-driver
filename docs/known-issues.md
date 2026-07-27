@@ -195,6 +195,16 @@ $ openstack share access create my-wekafs-share ip 10.0.0.5
 # Rule shows 'active' but does not grant mount access
 ```
 
+The rule's `--access-level` (`ro` vs `rw`) is likewise ignored for WEKAFS.
+The driver always provisions a single least-privilege `Regular` mount user
+per org and returns the same `access_key` regardless of the level
+requested, so a rule created with `--access-level ro` still grants the
+tenant full `Regular`-role (read-write) access to that org's data. A
+read-only WEKAFS share is therefore **not** achievable through the Manila
+access-level flag; the value is accepted but has no effect. (For NFS, by
+contrast, `--access-level ro`/`rw` maps directly to the export's RO/RW
+permission and is enforced.)
+
 **Workaround:**
 Create a Manila access rule on the WEKAFS share.  The rule's
 `access_key` field carries the mount user's password (self-service,
