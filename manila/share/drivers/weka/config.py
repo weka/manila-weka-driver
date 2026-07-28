@@ -140,6 +140,35 @@ weka_opts = [
         ),
     ),
 
+    # --- WEKAFS per-share access (security policies) ---
+    # Named access-policy groups (Model B).  A WEKAFS share whose share
+    # type sets the "weka:security_policy_group" extra spec to <group> is
+    # created with the Allow security policies defined here attached, so
+    # only clients in the listed CIDRs may mount it (read-write for rw,
+    # read-only for ro).  The same policy object is reused across every
+    # share of the type, so a group scales to many shares within the
+    # project's per-org policy budget.  Shares without the extra spec use
+    # per-share policies driven directly by their Manila access rules
+    # (Model A) instead.
+    cfg.StrOpt(
+        'weka_security_policy_group',
+        default=None,
+        help=(
+            'Named WEKAFS access-policy group definitions. '
+            'Semicolon-separated entries, each '
+            '"<group>:<rw|ro>:<cidr[,cidr...]>", e.g. '
+            '"team-a:rw:10.0.1.0/24,10.0.2.0/24; team-a:ro:10.0.9.0/24; '
+            'team-b:rw:10.1.0.0/16". A WEKAFS share whose share type sets '
+            'the "weka:security_policy_group" extra spec to the group '
+            'name is created with the matching Allow security policies '
+            'attached (read-write for rw entries, read-only for ro '
+            'entries); clients outside the listed CIDRs are denied the '
+            'mount, and the same policy object is reused across every '
+            'share of the type. Leave unset to rely solely on per-share '
+            'access rules.'
+        ),
+    ),
+
     # --- POSIX client ---
     cfg.StrOpt(
         'weka_mount_point_base',

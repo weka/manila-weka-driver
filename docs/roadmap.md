@@ -32,18 +32,39 @@ the same pattern as `vast_vippool_name` in
   - `doc/source/admin/weka_share_driver.rst:125`, our reply `fcb996e2`
     (in reply to `a59f220a`)
 
-## 3. WEKAFS access enforcement via IP-based security policies
+## 3. WEKAFS access enforcement via IP-based security policies — IMPLEMENTED
 
-WEKAFS (POSIX kernel client) access rules are currently **accepted as a no-op**
-and reported `active`; there is no Manila-level access control for WEKAFS. NFS
-shares already do IP-based enforcement.
+**Status: done.** WEKAFS `ip` access rules are now enforced with Weka
+per-filesystem security policies (IPv4). The driver maps each `ip` rule to a
+per-share `Allow` policy and honors `--access-level` (`ro` installs a
+read-only policy). Two models are supported:
 
-- Direction: enforce WEKAFS access rules using Weka IP-based security policies.
-- Gerrit threads (change 989998):
+- **Model A (per share, default):** `ip` rules drive two per-share policies
+  (`manila-<share8>-rw` / `-ro`). Once a policy is attached, a client whose
+  source IP matches no policy is denied the mount.
+- **Model B (named group):** a share type with the
+  `weka:security_policy_group` extra spec attaches shared group policies
+  (`manila-grp-<group>-*`) defined by the `weka_security_policy_group`
+  config, reused across every share of the type (see
+  [configuration.md](configuration.md)).
+
+`user`/`cert` rules still grant the org-boundary mount credential (they
+cannot map to an IP policy). See
+[known-issues.md §6](known-issues.md#6-wekafs-access-control-scope-and-limits)
+for the remaining scope/limits (client-IP granularity, the interface-group
+caveat, and the per-org policy budget).
+
+- Original Gerrit threads (change 989998):
   - `doc/source/admin/weka_share_driver.rst:237`, our reply `66d1d827`
     (in reply to `61f54ac6`)
   - `manila/share/drivers/weka/driver.py:660`, our reply `4701a7f2`
     (in reply to `d423f5e1`)
+
+### Remaining follow-ups
+- Per-*user* (not per-IP) WEKAFS access — would need POSIX ACLs (uid-based,
+  client-trust) or NFS Kerberos; not covered by IP policies.
+- Scaling past the per-org policy budget for very large share counts with
+  unique per-share rules (use Model B group reuse to stay within budget).
 
 ## 4. QoS / thin provisioning
 

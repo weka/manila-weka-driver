@@ -56,8 +56,16 @@ Manila driver operation.
 | `update_access` (NFS del) | `/nfsPermissions/{uid}` | DELETE | Remove permission |
 | `update_access` (NFS del) | `/clientGroups` | GET | Find client group by name |
 | `update_access` (NFS del) | `/clientGroups/{uid}` | DELETE | Remove per-rule client group |
-| `update_access` (WEKAFS) | `/users` | POST | Ensure Regular mount user exists (idempotent) |
-| `update_access` (WEKAFS) | *(rule storage only)* | — | Rule returned as `active`; `access_key` set to mount user password. Enforcement is via Weka org auth (`auth_required=True`). No per-filesystem mount-token endpoint — token comes from `POST /login`. See [known-issues.md §6](known-issues.md#6-wekafs-shares-do-not-support-manila-access-rules) |
+| `update_access` (WEKAFS) | `/users` | POST | Ensure Regular mount user exists (idempotent); its password is returned as each rule's `access_key` |
+| `update_access` (WEKAFS ip add) | `/security/policies` | GET | Find the per-share rw/ro policy by name (`manila-<share8>-<rw\|ro>`) |
+| `update_access` (WEKAFS ip add) | `/security/policies` | POST | Create the per-share `Allow` policy (first ip at that level; `read_only` for ro) |
+| `update_access` (WEKAFS ip add) | `/security/policies/{uid}` | PATCH | `add_ip` the client IP to an existing policy |
+| `update_access` (WEKAFS ip add) | `/fileSystems/{uid}/securityPolicy/attach` | POST | Attach the policy to the share's filesystem |
+| `update_access` (WEKAFS ip del) | `/security/policies/{uid}` | PATCH | `remove_ip` the client IP from the policy |
+| `update_access` (WEKAFS ip del) | `/fileSystems/{uid}/securityPolicy/detach` | POST | Detach when the policy becomes empty |
+| `update_access` (WEKAFS ip del) | `/security/policies/{uid}` | DELETE | Delete the now-empty per-share policy |
+| `update_access` (WEKAFS user/cert) | *(credential only)* | — | No IP policy; rule returned `active` with the mount `access_key`. Enforcement is the org boundary (`auth_required=True`) plus any attached ip policies. See [known-issues.md §6](known-issues.md#6-wekafs-access-control-scope-and-limits) |
+| `create_share` (WEKAFS, Model B) | `/security/policies` + `/fileSystems/{uid}/securityPolicy/attach` | GET/POST | For a share type with `weka:security_policy_group`, ensure and attach the shared group policies (`manila-grp-<group>-<rw\|ro>`) |
 
 ## Driver Setup
 
