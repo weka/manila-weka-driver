@@ -153,9 +153,11 @@ When `share_proto == 'WEKAFS'`:
 - The filesystem is always created inside the project's own Weka org
   with `auth_required=True`; only a client holding a token scoped to
   that org can mount it.  See §10 below.
-- Manila access rules (IP/user) are accepted as `active` but have no
-  effect on the WekaFS mount path; enforcement is via Weka org auth.
-  See [Known Issues §6](known-issues.md#6-wekafs-shares-do-not-support-manila-access-rules).
+- Manila `ip` access rules are enforced per share via Weka security
+  policies (deny-by-default once attached; `--access-level` honored), on
+  top of the org-auth boundary; `user`/`cert` rules grant the mount
+  credential only. See
+  [Known Issues §6](known-issues.md#6-wekafs-access-control-scope-and-limits).
 
 ### 9. `create_share_from_snapshot` data copy
 

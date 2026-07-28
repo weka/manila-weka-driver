@@ -97,6 +97,7 @@ from manila.share.drivers.weka import config as weka_config
 from manila.share.drivers.weka import exceptions as weka_exc
 from manila.share.drivers.weka import posix as weka_posix
 from manila.share.drivers.weka import utils as weka_utils
+from manila.share import share_types
 
 LOG = logging.getLogger(__name__)
 
@@ -126,6 +127,41 @@ def _cidr_to_weka_ip(cidr_str):
         return cidr_str
     net = ipaddress.IPv4Network(cidr_str, strict=False)
     return '{}/{}'.format(str(net.network_address), str(net.netmask))
+
+
+def _policy_ip(access_to):
+    """Normalize an access_to value for a Weka security policy.
+
+    Security policies accept a single IP, CIDR-prefix notation
+    (``IP/len``, e.g. ``192.168.2.0/21``), or a range (``IP1-IP2``).
+    Unlike NFS client-group rules (see _cidr_to_weka_ip), they do NOT use
+    a dotted-decimal mask, so CIDR input is passed through in prefix form
+    (a dotted mask like ``0.0.0.0/0.0.0.0`` is rejected by the API).
+
+    Raises ValueError for non-IPv4 input so the caller can mark the rule
+    as errored.
+    """
+    if '/' in access_to:
+        return str(ipaddress.IPv4Network(access_to, strict=False))
+    # Validate a bare IPv4 address; pass it through unchanged.
+    ipaddress.IPv4Address(access_to)
+    return access_to
+
+
+def _is_already_attached_error(exc):
+    """True if a Weka attach error means the policy is already attached.
+
+    Attaching a security policy that is already attached to a filesystem
+    returns an HTTP 500 whose message says it is "already present in the
+    list" (not a 4xx), so it is not caught by _is_already_exists_error.
+    Re-attaching an already-attached policy is a benign idempotent no-op
+    — a share with two IP rules at the same level shares one policy and
+    would otherwise re-attach it on the second rule — so this case is
+    tolerated by the attach callers.
+    """
+    if not isinstance(exc, weka_exc.WekaApiError):
+        return False
+    return 'already present in the list' in str(exc).lower()
 
 
 def _is_already_exists_error(exc):
@@ -199,6 +235,12 @@ class WekaShareDriver(driver.ShareDriver):
     _org_user = 'manila'
     _org_admin_secret = None
     _auth_token_dir = '/var/lib/manila/weka-tokens'
+    # Named WEKAFS access-policy groups (Model B), parsed from the
+    # weka_security_policy_group config in do_setup:
+    #   {group: {'rw': [cidr, ...], 'ro': [cidr, ...]}}
+    _policy_groups = {}
+    # Share-type extra spec that selects a named policy group.
+    _POLICY_GROUP_SPEC = 'weka:security_policy_group'
 
     def __init__(self, *args, **kwargs):
         """Initialise driver state; API client created in do_setup."""
@@ -281,6 +323,10 @@ class WekaShareDriver(driver.ShareDriver):
                     'always created with per-tenant organization '
                     'isolation, which derives per-org credentials from '
                     'this secret'))
+
+        # Parse the named WEKAFS access-policy groups (Model B).
+        self._policy_groups = self._parse_policy_groups(
+            cfg_get('weka_security_policy_group'))
 
         # Cache the NFS server for capability reporting.
         self._nfs_server = cfg_get('weka_nfs_server')
@@ -398,6 +444,12 @@ class WekaShareDriver(driver.ShareDriver):
             fs_name, group_name, size_bytes,
             client=client, auth_required=auth_required)
         fs_uid = fs['uid']
+
+        # Model B: if the share type selects a named security-policy
+        # group, attach that group's shared policies now so access is
+        # enforced from creation (no-op for shares without a group).
+        if self._is_isolated_wekafs(share):
+            self._ensure_group_policies(share, fs_uid)
 
         export_locations = self._build_export_locations(
             share, fs_name, fs_uid, share_proto)
@@ -797,6 +849,18 @@ class WekaShareDriver(driver.ShareDriver):
                 share['id'], exc,
             )
 
+        # Detach and delete the share's per-share (Model A) security
+        # policies while the filesystem still exists (no-op for NFS;
+        # shared Model B group policies are left in place).
+        if self._is_isolated_wekafs(share):
+            try:
+                self._cleanup_wekafs_policies(share, client, fs_uid)
+            except Exception as exc:
+                LOG.warning(
+                    "Failed to clean up security policies for share %s: %s",
+                    share['id'], exc,
+                )
+
         # Unmount locally if mounted.  Unmount takes no mount options, so
         # no auth token is needed here.
         mount_point = self._mount_point(fs_name)
@@ -1130,54 +1194,219 @@ class WekaShareDriver(driver.ShareDriver):
             pass
 
     def _update_wekafs_access(self, share, add_rules, delete_rules):
-        """Handle WekaFS access rules.
+        """Apply WekaFS access rules using per-filesystem security policies.
 
-        Access to a WEKAFS share is enforced at the Weka organization
-        boundary, not per Manila access rule: the filesystem is always
-        created with authentication required inside the project's own
-        organization, so only a client holding a token scoped to that
-        organization can mount it.
+        Every WEKAFS filesystem lives in its project's own Weka
+        organization with ``auth_required``, so mounting always needs a
+        token scoped to that org (the tenant boundary).  On top of that
+        boundary this method enforces *per-share* access with Weka
+        security policies, which the cluster evaluates at native mount
+        time by the client's source IP:
 
-        There is no per-IP / per-client Weka primitive for the POSIX
-        client, so each rule is accepted as a no-op (marked active).  As
-        a self-service convenience, the driver ensures a least-privilege
-        (Regular) mount user exists in the project's org and returns that
-        user's password as the rule's access_key, so tenants can mint
-        their own mount token via ``weka user login`` without an operator
-        handing them a secret.
-        The org's TenantAdmin credential is never exposed.
+          * Model B (named group) — if the share's share type sets the
+            ``weka:security_policy_group`` extra spec, access is governed
+            by the shared group policies attached at create_share; the
+            per-rule IPs here are not the source of truth, so rules are
+            accepted as active (the mount credential is still returned).
 
-        The rule's ``access_level`` (ro/rw) is not honored: the mount
-        user is always a ``Regular`` role and the same access_key is
-        returned regardless, so an ``ro`` rule still grants read-write
-        access. See docs/known-issues.md #6.
+          * Model A (per share) — otherwise each ``ip`` rule is mapped to
+            one of two per-share policies: ``manila-<share8>-rw`` (Allow)
+            and ``manila-<share8>-ro`` (Allow, read-only).  The rule's
+            ``access_level`` is honored (an ``ro`` rule forces a
+            read-only mount via the policy's read_only flag).  Once a
+            policy is attached, a client whose IP matches no policy is
+            denied the mount.
+
+        As a self-service convenience the driver also ensures a
+        least-privilege (Regular) mount user exists in the project's org
+        and returns that user's password as each rule's ``access_key`` so
+        tenants can mint their own mount token; the org's TenantAdmin
+        credential is never exposed.
+
+        ``user``/``cert`` rules do not map to an IP policy, so they only
+        grant the org-boundary mount credential (active, no per-share IP
+        restriction) — preserving the original self-service flow.  An
+        ``ip`` rule additionally installs the per-share IP policy.  IPv6
+        ``ip`` rules are rejected with an ``error`` state (IPv4 only).
         """
-        rule_state_map = {}
-        access_key = None
-        if add_rules and self._is_isolated_wekafs(share):
-            project_id = share.get('project_id')
-            org_client = self._org_client(project_id)
-            mount_user = self._org_mount_user()
-            access_key = self._org_mount_password(project_id)
+        project_id = share.get('project_id')
+        org_client = self._org_client(project_id)
+        access_key = self._org_mount_password(project_id)
+
+        # Ensure the self-service mount user exists (idempotent) whenever
+        # there is access to grant.
+        if add_rules:
             try:
-                org_client.create_user(mount_user, 'Regular', access_key)
+                org_client.create_user(
+                    self._org_mount_user(), 'Regular', access_key)
             except weka_exc.WekaApiError as exc:
                 # Idempotent: the mount user may already exist from an
                 # earlier access rule on another share in this project.
                 if not _is_already_exists_error(exc):
                     raise
+
+        rule_state_map = {}
+
+        # Model B: access is governed by the named policy group attached
+        # at create_share; per-rule IPs are a no-op here.
+        if self._share_policy_group(share) is not None:
+            for rule in add_rules or []:
+                LOG.info(
+                    "WEKAFS share %s uses security-policy group access; "
+                    "per-rule entry %s (type=%s) accepted as active.",
+                    share['id'], rule['access_id'], rule['access_type'],
+                )
+                rule_state_map[rule['access_id']] = {
+                    'state': 'active', 'access_key': access_key}
+            return rule_state_map
+
+        # Model A: per-share rw/ro policies driven by the access rules.
+        # Only resolve the filesystem UID when there is actual ip work
+        # (attach/detach); user/cert rules never touch a policy.
+        ip_work = any(
+            r.get('access_type') == 'ip'
+            for r in list(add_rules or []) + list(delete_rules or []))
+        fs_uid = None
+        if ip_work:
+            fs = org_client.get_filesystem_by_name(
+                self._share_name(share['id']))
+            fs_uid = fs['uid'] if fs else None
+
         for rule in add_rules or []:
-            LOG.info(
-                "WEKAFS access for share %s is enforced at the Weka "
-                "organization boundary; per-rule entry %s (type=%s) is "
-                "accepted as a no-op.",
-                share['id'], rule['access_id'], rule['access_type'],
-            )
-            entry = {'state': 'active'}
-            if access_key:
-                entry['access_key'] = access_key
-            rule_state_map[rule['access_id']] = entry
+            if rule['access_type'] != 'ip':
+                # user/cert rules can't map to an IP policy; they still
+                # grant the org-boundary mount credential (the original
+                # self-service behavior), just without a per-share IP
+                # restriction.
+                LOG.info(
+                    "WEKAFS rule %s (type=%s) grants the org-boundary "
+                    "mount credential; no per-share IP policy created.",
+                    rule['access_id'], rule['access_type'],
+                )
+                rule_state_map[rule['access_id']] = {
+                    'state': 'active', 'access_key': access_key}
+                continue
+            if _is_ipv6(rule['access_to']):
+                LOG.warning(
+                    "IPv6 access rule %s rejected; Weka driver supports "
+                    "IPv4 only.", rule['access_id'],
+                )
+                rule_state_map[rule['access_id']] = {'state': 'error'}
+                continue
+            try:
+                self._apply_wekafs_rule(org_client, share, fs_uid, rule)
+                rule_state_map[rule['access_id']] = {
+                    'state': 'active', 'access_key': access_key}
+            except Exception as exc:
+                LOG.error(
+                    "Failed to apply WEKAFS rule %s on share %s: %s",
+                    rule['access_id'], share['id'], exc,
+                )
+                rule_state_map[rule['access_id']] = {'state': 'error'}
+
+        for rule in delete_rules or []:
+            try:
+                self._remove_wekafs_rule(org_client, share, fs_uid, rule)
+            except Exception as exc:
+                LOG.warning(
+                    "Failed to remove WEKAFS rule %s on share %s: %s",
+                    rule['access_id'], share['id'], exc,
+                )
+
         return rule_state_map
+
+    def _apply_wekafs_rule(self, org_client, share, fs_uid, rule):
+        """Add one ip rule to the matching per-share rw/ro policy.
+
+        Places the client IP in the policy for the rule's access level
+        and removes it from the opposite-level policy so that an
+        ro<->rw change on the same IP does not leave a stale entry.
+        """
+        weka_ip = _policy_ip(rule['access_to'])
+        level = ('rw' if rule['access_level'] == constants.ACCESS_LEVEL_RW
+                 else 'ro')
+        other = 'ro' if level == 'rw' else 'rw'
+        self._policy_set_ip(
+            org_client, share, fs_uid, level, weka_ip, present=True)
+        self._policy_set_ip(
+            org_client, share, fs_uid, other, weka_ip, present=False)
+        LOG.debug(
+            "Applied WEKAFS %s access for %s on share %s",
+            level, rule['access_to'], share['id'],
+        )
+
+    def _remove_wekafs_rule(self, org_client, share, fs_uid, rule):
+        """Remove an ip rule's IP from both per-share policies.
+
+        Non-ip rules never created a policy, so there is nothing to undo.
+        """
+        if rule.get('access_type') != 'ip':
+            return
+        weka_ip = _policy_ip(rule['access_to'])
+        for level in ('rw', 'ro'):
+            self._policy_set_ip(
+                org_client, share, fs_uid, level, weka_ip, present=False)
+
+    def _policy_set_ip(self, org_client, share, fs_uid, level, weka_ip,
+                       present):
+        """Ensure *weka_ip* is present/absent in a per-share level policy.
+
+        When adding, creates the policy on first use and attaches it to
+        the filesystem.  When removing, drops the IP and, if the policy
+        becomes empty, detaches and deletes it so the org's policy budget
+        is not leaked across rule add/delete cycles.
+        """
+        name = self._wekafs_policy_name(share['id'], level)
+        read_only = (level == 'ro')
+        pol = org_client.get_security_policy_by_name(name)
+
+        if present:
+            if pol is None:
+                pol = org_client.create_security_policy(
+                    name, ips=[weka_ip], action='Allow',
+                    read_only=read_only)
+            elif weka_ip not in (pol.get('ip') or []):
+                try:
+                    org_client.update_security_policy(
+                        self._policy_uid(pol), name, add_ips=[weka_ip])
+                except weka_exc.WekaApiError as exc:
+                    if not _is_already_exists_error(exc):
+                        raise
+            if fs_uid:
+                try:
+                    org_client.attach_fs_security_policies(
+                        fs_uid, [self._policy_uid(pol)])
+                except weka_exc.WekaApiError as exc:
+                    # Tolerate an already-attached policy on re-apply (a
+                    # second IP at the same level reuses one policy).
+                    if not (_is_already_exists_error(exc)
+                            or _is_already_attached_error(exc)):
+                        raise
+            return
+
+        # present is False -> remove the IP.
+        if pol is None:
+            return
+        current = list(pol.get('ip') or [])
+        if weka_ip in current:
+            try:
+                org_client.update_security_policy(
+                    self._policy_uid(pol), name, remove_ips=[weka_ip])
+            except weka_exc.WekaNotFound:
+                pass
+            current = [i for i in current if i != weka_ip]
+        if not current:
+            # Policy has no IPs left: detach and delete it.
+            if fs_uid:
+                try:
+                    org_client.detach_fs_security_policies(
+                        fs_uid, [self._policy_uid(pol)])
+                except weka_exc.WekaApiError:
+                    pass
+            try:
+                org_client.delete_security_policy(self._policy_uid(pol))
+            except weka_exc.WekaNotFound:
+                pass
 
     def _remove_nfs_rule(self, fs_name, rule):
         """Remove the NFS permission AND client group for a rule.
@@ -1557,6 +1786,148 @@ class WekaShareDriver(driver.ShareDriver):
     def _org_mount_user(self):
         """Least-privilege (Regular) username tenants use to mount."""
         return '{}-mnt'.format(self._org_user)
+
+    # ------------------------------------------------------------------
+    # Security policy helpers (WEKAFS per-share IP access control)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _policy_uid(policy):
+        """Return a security policy's UID (Weka uses 'uid'; fall back id)."""
+        return policy.get('uid') or policy.get('id')
+
+    @staticmethod
+    def _wekafs_policy_name(share_id, level):
+        """Per-share Model A policy name for an access level (rw/ro)."""
+        return 'manila-{}-{}'.format(share_id[:8], level)
+
+    @staticmethod
+    def _group_policy_name(group, level):
+        """Shared Model B policy name for a named group + level (rw/ro)."""
+        return 'manila-grp-{}-{}'.format(group, level)
+
+    @staticmethod
+    def _parse_policy_groups(spec):
+        """Parse the weka_security_policy_group string into a nested dict.
+
+        *spec* is a semicolon-separated list of
+        "<group>:<rw|ro>:<cidr[,cidr...]>" entries.  Malformed entries
+        are logged and skipped so one bad entry does not break driver
+        startup.  Returns {group: {'rw': [...], 'ro': [...]}}.
+        """
+        groups = {}
+        if not spec:
+            return groups
+        for entry in spec.split(';'):
+            entry = entry.strip()
+            if not entry:
+                continue
+            parts = entry.split(':')
+            if len(parts) != 3:
+                LOG.warning(
+                    "Ignoring malformed weka_security_policy_group entry "
+                    "(expected '<group>:<rw|ro>:<cidr,...>'): %s", entry)
+                continue
+            group = parts[0].strip()
+            level = parts[1].strip().lower()
+            if not group or level not in ('rw', 'ro'):
+                LOG.warning(
+                    "Ignoring weka_security_policy_group entry with an "
+                    "invalid group/level: %s", entry)
+                continue
+            ips = [c.strip() for c in parts[2].split(',') if c.strip()]
+            groups.setdefault(group, {}).setdefault(level, [])
+            groups[group][level].extend(ips)
+        return groups
+
+    def _share_policy_group(self, share):
+        """Return the named policy group for a share, or None.
+
+        Reads the ``weka:security_policy_group`` share-type extra spec.
+        Returns None when the share has no type, the lookup fails, or the
+        spec is unset (Model A / per-share rules apply).
+        """
+        type_id = share.get('share_type_id')
+        if not type_id:
+            return None
+        try:
+            specs = share_types.get_share_type_extra_specs(type_id) or {}
+        except Exception as exc:
+            LOG.warning(
+                "Could not read share type extra specs for share %s: %s",
+                share.get('id'), exc)
+            return None
+        return specs.get(self._POLICY_GROUP_SPEC) or None
+
+    def _ensure_group_policies(self, share, fs_uid):
+        """Attach a Model B named group's shared policies to a filesystem.
+
+        No-op when the share has no policy group.  The group's policy
+        objects are created once per org (by name) and reused across
+        every share of the type, so this only creates them on first use
+        and otherwise just attaches the existing ones.
+        """
+        group = self._share_policy_group(share)
+        if not group:
+            return
+        profile = self._policy_groups.get(group)
+        if not profile:
+            LOG.warning(
+                "Share %s references unknown security policy group '%s' "
+                "(not defined in weka_security_policy_group); no access "
+                "policy attached.", share['id'], group)
+            return
+        org_client = self._org_client(share.get('project_id'))
+        for level in ('rw', 'ro'):
+            ips = profile.get(level) or []
+            if not ips:
+                continue
+            name = self._group_policy_name(group, level)
+            pol = org_client.get_security_policy_by_name(name)
+            if pol is None:
+                pol = org_client.create_security_policy(
+                    name, ips=ips, action='Allow',
+                    read_only=(level == 'ro'))
+            try:
+                org_client.attach_fs_security_policies(
+                    fs_uid, [self._policy_uid(pol)])
+            except weka_exc.WekaApiError as exc:
+                if not (_is_already_exists_error(exc)
+                        or _is_already_attached_error(exc)):
+                    raise
+        LOG.info(
+            "Attached security-policy group '%s' to WEKAFS share %s",
+            group, share['id'])
+
+    def _cleanup_wekafs_policies(self, share, org_client, fs_uid):
+        """Detach and delete a share's per-share (Model A) policies.
+
+        Group (Model B) policies are shared across shares and named
+        ``manila-grp-*``; they never match the per-share names here, so
+        they are intentionally left in place.
+        """
+        for level in ('rw', 'ro'):
+            name = self._wekafs_policy_name(share['id'], level)
+            try:
+                pol = org_client.get_security_policy_by_name(name)
+            except Exception:
+                pol = None
+            if not pol:
+                continue
+            uid = self._policy_uid(pol)
+            if fs_uid:
+                try:
+                    org_client.detach_fs_security_policies(fs_uid, [uid])
+                except Exception:
+                    pass
+            try:
+                org_client.delete_security_policy(uid)
+            except weka_exc.WekaNotFound:
+                pass
+            except Exception as exc:
+                LOG.warning(
+                    "Failed to delete security policy '%s' for share %s: "
+                    "%s", name, share['id'], exc)
 
     def _ensure_org(self, project_id):
         """Get-or-create the Weka organization for a Manila project.

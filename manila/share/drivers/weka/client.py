@@ -200,6 +200,12 @@ class WekaApiClient(object):
                 if exc.status_code and exc.status_code < 500:
                     raise
                 last_exc = exc
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as exc:
+                # Transient network faults (e.g. a stale keep-alive
+                # connection closed server-side: "RemoteDisconnected") are
+                # retried like 5xx rather than failing the operation.
+                last_exc = exc
 
             if attempt < self._max_retries:
                 LOG.warning(
@@ -682,6 +688,109 @@ class WekaApiClient(object):
             pass
         return self._delete(
             '/nfs/clientGroups/{uid}'.format(uid=group_uid))
+
+    # ------------------------------------------------------------------
+    # Security policy methods (WEKAFS per-share IP access control)
+    # ------------------------------------------------------------------
+    #
+    # Security policies are CIDR-based Allow/Deny rules attached to a
+    # filesystem and enforced by the cluster at native (POSIX/DPDK) mount
+    # time: once any policy is attached, a client whose source IP matches
+    # no policy is denied, and a matching policy's read_only flag forces a
+    # read-only mount.  Policies are organization-owned, so these methods
+    # must be called on an org-scoped client (see for_org()).
+
+    def list_security_policies(self):
+        """Return all security policies in the authenticated org.
+
+        GET /security/policies
+        """
+        result = self._get('/security/policies')
+        return result.get('data', result)
+
+    def get_security_policy_by_name(self, name):
+        """Find a security policy by name; returns None if not found."""
+        for pol in self.list_security_policies() or []:
+            if pol.get('name') == name:
+                return pol
+        return None
+
+    def create_security_policy(self, name, ips, action='Allow',
+                               read_only=False):
+        """Create a CIDR-based security policy.
+
+        POST /security/policies
+
+        :param name: Unique policy name within the organization.
+        :param ips: List of IPs / CIDRs / ranges the policy matches.
+        :param action: 'Allow' or 'Deny'.
+        :param read_only: Force matched mounts read-only when True.
+        :returns: Created policy dict (includes 'uid'/'id').
+        """
+        payload = {
+            'name': name,
+            'action': action,
+            'ip': list(ips or []),
+            'read_only': read_only,
+        }
+        result = self._post('/security/policies', json=payload)
+        return result.get('data', result)
+
+    def update_security_policy(self, policy_uid, name,
+                               add_ips=None, remove_ips=None):
+        """Incrementally add/remove IP ranges on a security policy.
+
+        PATCH /security/policies/{uid}
+
+        The Weka API requires 'name' on every update, so the caller must
+        pass the policy's current name.  add_ip/remove_ip amend the
+        existing IP list in place without replacing it.
+        """
+        payload = {'name': name}
+        if add_ips:
+            payload['add_ip'] = list(add_ips)
+        if remove_ips:
+            payload['remove_ip'] = list(remove_ips)
+        result = self._patch(
+            '/security/policies/{uid}'.format(uid=policy_uid), json=payload)
+        return result.get('data', result)
+
+    def delete_security_policy(self, policy_uid):
+        """Delete a security policy.
+
+        DELETE /security/policies/{uid}
+        """
+        return self._delete(
+            '/security/policies/{uid}'.format(uid=policy_uid))
+
+    def get_fs_security_policies(self, fs_uid):
+        """Return the security policies attached to a filesystem.
+
+        GET /fileSystems/{uid}/securityPolicy
+        """
+        result = self._get(
+            '/fileSystems/{uid}/securityPolicy'.format(uid=fs_uid))
+        return result.get('data', result)
+
+    def attach_fs_security_policies(self, fs_uid, policy_uids):
+        """Attach one or more security policies to a filesystem.
+
+        POST /fileSystems/{uid}/securityPolicy/attach
+        """
+        result = self._post(
+            '/fileSystems/{uid}/securityPolicy/attach'.format(uid=fs_uid),
+            json={'policies': list(policy_uids)})
+        return result.get('data', result)
+
+    def detach_fs_security_policies(self, fs_uid, policy_uids):
+        """Detach one or more security policies from a filesystem.
+
+        POST /fileSystems/{uid}/securityPolicy/detach
+        """
+        result = self._post(
+            '/fileSystems/{uid}/securityPolicy/detach'.format(uid=fs_uid),
+            json={'policies': list(policy_uids)})
+        return result.get('data', result)
 
     # ------------------------------------------------------------------
     # Snapshot methods

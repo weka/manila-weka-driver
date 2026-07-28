@@ -172,6 +172,31 @@ class TestWekaApiClientAuth(unittest.TestCase):
                     weka_exc.WekaRateLimited,
                     c._request, 'GET', '/fileSystems')
 
+    def test_retry_on_connection_error(self):
+        c = self._make_client()
+        c._access_token = 'tok'
+        c._max_retries = 2
+        ok_resp = _make_response(200, {'data': []})
+        with mock.patch.object(
+                c._session, 'request',
+                side_effect=[requests.exceptions.ConnectionError('boom'),
+                             ok_resp]):
+            with mock.patch('time.sleep'):
+                result = c._request('GET', '/fileSystems')
+        self.assertEqual(ok_resp, result)
+
+    def test_connection_error_exhausted_raises(self):
+        c = self._make_client()
+        c._access_token = 'tok'
+        c._max_retries = 1
+        with mock.patch.object(
+                c._session, 'request',
+                side_effect=requests.exceptions.ConnectionError('boom')):
+            with mock.patch('time.sleep'):
+                self.assertRaises(
+                    requests.exceptions.ConnectionError,
+                    c._request, 'GET', '/fileSystems')
+
     def test_404_not_retried(self):
         c = self._make_client()
         c._access_token = 'tok'
@@ -464,6 +489,125 @@ class TestWekaApiClientNFS(unittest.TestCase):
                                side_effect=check):
             self.client.add_client_group_rule(
                 fakes.FAKE_CG_UID, 'DNS', '*.example.com')
+
+
+class TestWekaApiClientSecurityPolicies(unittest.TestCase):
+
+    def setUp(self):
+        self.client = weka_client.WekaApiClient(
+            host='weka-test', username='admin', password='secret',
+            ssl_verify=False, timeout=5, max_retries=0)
+        self.client._access_token = 'tok'
+
+    def _capture(self, json_data=None):
+        """Patch _session.request, capturing the call, returning a resp."""
+        captured = {}
+
+        def side_effect(method, url, **kwargs):
+            captured['method'] = method
+            captured['url'] = url
+            captured['json'] = kwargs.get('json')
+            resp = _make_response(200, json_data or {})
+            if json_data is None:
+                resp.content = b''
+            return resp
+        patch = mock.patch.object(
+            self.client._session, 'request', side_effect=side_effect)
+        return patch, captured
+
+    def test_list_security_policies(self):
+        pols = [fakes.fake_security_policy()]
+        patch, cap = self._capture({'data': pols})
+        with patch:
+            result = self.client.list_security_policies()
+        self.assertEqual(pols, result)
+        self.assertEqual('GET', cap['method'])
+        self.assertIn('/security/policies', cap['url'])
+
+    def test_get_security_policy_by_name_found(self):
+        pols = [fakes.fake_security_policy(name='manila-abc-rw')]
+        with mock.patch.object(self.client, 'list_security_policies',
+                               return_value=pols):
+            result = self.client.get_security_policy_by_name('manila-abc-rw')
+        self.assertEqual('manila-abc-rw', result['name'])
+
+    def test_get_security_policy_by_name_not_found(self):
+        with mock.patch.object(self.client, 'list_security_policies',
+                               return_value=[]):
+            result = self.client.get_security_policy_by_name('missing')
+        self.assertIsNone(result)
+
+    def test_create_security_policy(self):
+        pol = fakes.fake_security_policy(ips=['10.0.0.0/24'])
+        patch, cap = self._capture({'data': pol})
+        with patch:
+            result = self.client.create_security_policy(
+                'manila-abc-rw', ips=['10.0.0.0/24'], read_only=False)
+        self.assertEqual(pol, result)
+        self.assertEqual('POST', cap['method'])
+        self.assertEqual('Allow', cap['json']['action'])
+        self.assertEqual(['10.0.0.0/24'], cap['json']['ip'])
+        self.assertFalse(cap['json']['read_only'])
+
+    def test_update_security_policy_add_and_remove(self):
+        pol = fakes.fake_security_policy()
+        patch, cap = self._capture({'data': pol})
+        with patch:
+            self.client.update_security_policy(
+                fakes.FAKE_POLICY_UID, 'manila-abc-rw',
+                add_ips=['10.0.0.1'], remove_ips=['10.0.0.2'])
+        self.assertEqual('PATCH', cap['method'])
+        self.assertIn(fakes.FAKE_POLICY_UID, cap['url'])
+        self.assertEqual('manila-abc-rw', cap['json']['name'])
+        self.assertEqual(['10.0.0.1'], cap['json']['add_ip'])
+        self.assertEqual(['10.0.0.2'], cap['json']['remove_ip'])
+
+    def test_update_security_policy_name_only(self):
+        pol = fakes.fake_security_policy()
+        patch, cap = self._capture({'data': pol})
+        with patch:
+            self.client.update_security_policy(
+                fakes.FAKE_POLICY_UID, 'manila-abc-rw')
+        self.assertEqual({'name': 'manila-abc-rw'}, cap['json'])
+
+    def test_delete_security_policy(self):
+        patch, cap = self._capture()
+        with patch:
+            result = self.client.delete_security_policy(
+                fakes.FAKE_POLICY_UID)
+        self.assertEqual({}, result)
+        self.assertEqual('DELETE', cap['method'])
+        self.assertIn(fakes.FAKE_POLICY_UID, cap['url'])
+
+    def test_get_fs_security_policies(self):
+        pols = [fakes.fake_security_policy()]
+        patch, cap = self._capture({'data': pols})
+        with patch:
+            result = self.client.get_fs_security_policies(fakes.FAKE_FS_UID)
+        self.assertEqual(pols, result)
+        self.assertIn(
+            '/fileSystems/{}/securityPolicy'.format(fakes.FAKE_FS_UID),
+            cap['url'])
+
+    def test_attach_fs_security_policies(self):
+        patch, cap = self._capture({'data': []})
+        with patch:
+            self.client.attach_fs_security_policies(
+                fakes.FAKE_FS_UID, [fakes.FAKE_POLICY_UID])
+        self.assertEqual('POST', cap['method'])
+        self.assertIn('securityPolicy/attach', cap['url'])
+        self.assertEqual(
+            {'policies': [fakes.FAKE_POLICY_UID]}, cap['json'])
+
+    def test_detach_fs_security_policies(self):
+        patch, cap = self._capture({'data': []})
+        with patch:
+            self.client.detach_fs_security_policies(
+                fakes.FAKE_FS_UID, [fakes.FAKE_POLICY_UID])
+        self.assertEqual('POST', cap['method'])
+        self.assertIn('securityPolicy/detach', cap['url'])
+        self.assertEqual(
+            {'policies': [fakes.FAKE_POLICY_UID]}, cap['json'])
 
 
 class TestWekaApiClientCapacity(unittest.TestCase):

@@ -940,9 +940,16 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
         self.assertIn(rule_id, result)
         self.assertEqual('error', result[rule_id]['state'])
 
-    def test_update_access_wekafs_ip_rule_accepted_as_noop(self):
-        """WEKAFS shares accept all access rules as no-op."""
+    def test_update_access_wekafs_ip_rule_creates_policy(self):
+        """A WEKAFS ip rule installs a per-share Allow security policy."""
         drv = self._make_driver()
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        drv._client.get_security_policy_by_name.return_value = None
+        drv._client.create_security_policy.return_value = (
+            fakes.fake_security_policy())
+        drv._client.attach_fs_security_policies.return_value = {}
+
         share = fakes.fake_share(proto='WEKAFS')
         rule = fakes.fake_access_rule(access_type='ip',
                                       access_to='10.0.0.1')
@@ -951,13 +958,46 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
             access_rules=[], add_rules=[rule], delete_rules=[],
             update_rules=[],
         )
-        self.assertEqual('active', result[rule['access_id']]['state'])
-        # No cluster API calls should be made
+        entry = result[rule['access_id']]
+        self.assertEqual('active', entry['state'])
+        # Tenants still receive the self-service mount credential.
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            entry['access_key'])
+        # A per-share rw Allow policy was created and attached.
+        args, kwargs = drv._client.create_security_policy.call_args
+        self.assertEqual('manila-share-uu-rw', args[0])
+        self.assertEqual(['10.0.0.1'], kwargs['ips'])
+        self.assertFalse(kwargs['read_only'])
+        drv._client.attach_fs_security_policies.assert_called_once_with(
+            fakes.FAKE_FS_UID, [fakes.FAKE_POLICY_UID])
+        # No NFS resources touched.
         drv._client.create_client_group.assert_not_called()
-        drv._client.create_nfs_permission.assert_not_called()
 
-    def test_update_access_wekafs_user_rule_accepted_as_noop(self):
-        """WEKAFS shares accept all access rules as no-op."""
+    def test_update_access_wekafs_ro_ip_rule_is_read_only_policy(self):
+        """An ro ip rule creates a read-only per-share policy."""
+        drv = self._make_driver()
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        drv._client.get_security_policy_by_name.return_value = None
+        drv._client.create_security_policy.return_value = (
+            fakes.fake_security_policy(read_only=True))
+        drv._client.attach_fs_security_policies.return_value = {}
+
+        share = fakes.fake_share(proto='WEKAFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='10.0.0.5', access_level='ro')
+        drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[rule], delete_rules=[],
+            update_rules=[])
+
+        args, kwargs = drv._client.create_security_policy.call_args
+        self.assertEqual('manila-share-uu-ro', args[0])
+        self.assertTrue(kwargs['read_only'])
+
+    def test_update_access_wekafs_user_rule_grants_credential_no_policy(self):
+        """A user rule grants the org credential but no IP policy."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         rule = fakes.fake_access_rule(access_type='user',
@@ -967,7 +1007,28 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
             access_rules=[], add_rules=[rule], delete_rules=[],
             update_rules=[],
         )
-        self.assertEqual('active', result[rule['access_id']]['state'])
+        entry = result[rule['access_id']]
+        self.assertEqual('active', entry['state'])
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            entry['access_key'])
+        # No IP policy for a non-ip rule.
+        drv._client.create_security_policy.assert_not_called()
+
+    def test_update_access_wekafs_ipv6_ip_rule_errors(self):
+        """An IPv6 ip rule on a WEKAFS share is rejected."""
+        drv = self._make_driver()
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        share = fakes.fake_share(proto='WEKAFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='2001:db8::1')
+        result = drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[rule], delete_rules=[],
+            update_rules=[])
+        self.assertEqual('error', result[rule['access_id']]['state'])
+        drv._client.create_security_policy.assert_not_called()
 
     def test_update_access_nfs_ipv6_rule_raises_invalid_access(self):
         """IPv6 ip rules on NFS shares raise InvalidShareAccess."""
@@ -3222,6 +3283,642 @@ class TestGetFsUidOrmAndPathEdgeCases(unittest.TestCase):
         self.assertRaises(
             exception.ShareNotFound,
             drv._get_fs_uid_for_share, share)
+
+
+_SPEC_PATCH = (
+    'manila.share.drivers.weka.driver.share_types.'
+    'get_share_type_extra_specs')
+
+
+class TestWekaShareDriverSecurityPolicies(unittest.TestCase):
+    """WEKAFS per-share access via security policies (Model A + Model B)."""
+
+    def _make_driver(self, **cfg):
+        drv = weka_driver.WekaShareDriver.__new__(weka_driver.WekaShareDriver)
+        drv.configuration = _make_config(**cfg)
+        drv._client = mock.Mock()
+        drv._fs_group_uid = fakes.FAKE_GROUP_UID
+        drv._policy_groups = {}
+        _wire_org(drv)
+        return drv
+
+    def _org_client(self, drv):
+        org_client = mock.Mock()
+        drv._client.for_org.return_value = org_client
+        return org_client
+
+    def _ip_rule(self, ip='10.0.0.1', level='rw'):
+        return fakes.fake_access_rule(
+            access_type='ip', access_to=ip, access_level=level)
+
+    # -- Model A: apply --------------------------------------------------
+
+    def test_apply_ip_rule_adds_to_existing_policy(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        existing = fakes.fake_security_policy(
+            name='manila-share-uu-rw', ips=['10.0.0.9'])
+        org.get_security_policy_by_name.side_effect = (
+            lambda name: existing if name.endswith('-rw') else None)
+
+        share = fakes.fake_share(proto='WEKAFS')
+        drv.update_access(None, share, [], [self._ip_rule()], [], [])
+
+        _, kwargs = org.update_security_policy.call_args
+        self.assertEqual(['10.0.0.1'], kwargs['add_ips'])
+        org.attach_fs_security_policies.assert_called_with(
+            fakes.FAKE_FS_UID, [fakes.FAKE_POLICY_UID])
+        org.create_security_policy.assert_not_called()
+
+    def test_apply_ip_rule_already_present_no_update(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        existing = fakes.fake_security_policy(
+            name='manila-share-uu-rw', ips=['10.0.0.1'])
+        org.get_security_policy_by_name.side_effect = (
+            lambda name: existing if name.endswith('-rw') else None)
+
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [],
+            [self._ip_rule()], [], [])
+
+        org.update_security_policy.assert_not_called()
+        org.attach_fs_security_policies.assert_called_once()
+
+    def test_apply_ip_rule_level_change_removes_from_other(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.create_security_policy.return_value = fakes.fake_security_policy()
+        ro_pol = fakes.fake_security_policy(
+            name='manila-share-uu-ro', ips=['10.0.0.1'], uid='pol-ro')
+
+        def by_name(name):
+            return None if name.endswith('-rw') else ro_pol
+        org.get_security_policy_by_name.side_effect = by_name
+
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [],
+            [self._ip_rule(level='rw')], [], [])
+
+        # New rw policy created; the ip removed from the ro policy, which
+        # then becomes empty and is detached + deleted.
+        org.create_security_policy.assert_called_once()
+        org.delete_security_policy.assert_called_once_with('pol-ro')
+
+    def test_apply_ip_rule_fs_missing_skips_attach(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = None
+        org.get_security_policy_by_name.return_value = None
+        org.create_security_policy.return_value = fakes.fake_security_policy()
+
+        result = drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [],
+            [self._ip_rule()], [], [])
+
+        self.assertEqual(
+            'active', result[list(result)[0]]['state'])
+        org.create_security_policy.assert_called_once()
+        org.attach_fs_security_policies.assert_not_called()
+
+    def test_apply_ip_rule_error_sets_error_state(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.get_security_policy_by_name.return_value = None
+        org.create_security_policy.side_effect = weka_exc.WekaApiError(
+            status_code=500, reason='boom')
+
+        rule = self._ip_rule()
+        result = drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [rule], [], [])
+        self.assertEqual('error', result[rule['access_id']]['state'])
+
+    def test_apply_ip_rule_add_ip_conflict_tolerated(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        existing = fakes.fake_security_policy(
+            name='manila-share-uu-rw', ips=['10.0.0.9'])
+        org.get_security_policy_by_name.side_effect = (
+            lambda name: existing if name.endswith('-rw') else None)
+        org.update_security_policy.side_effect = weka_exc.WekaConflict(
+            reason='already exists')
+
+        rule = self._ip_rule()
+        result = drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [rule], [], [])
+        self.assertEqual('active', result[rule['access_id']]['state'])
+
+    def test_apply_ip_rule_attach_conflict_tolerated(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.get_security_policy_by_name.return_value = None
+        org.create_security_policy.return_value = fakes.fake_security_policy()
+        org.attach_fs_security_policies.side_effect = weka_exc.WekaConflict(
+            reason='already attached')
+
+        rule = self._ip_rule()
+        result = drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [rule], [], [])
+        self.assertEqual('active', result[rule['access_id']]['state'])
+
+    def test_apply_ip_rule_attach_other_error_sets_error(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.get_security_policy_by_name.return_value = None
+        org.create_security_policy.return_value = fakes.fake_security_policy()
+        org.attach_fs_security_policies.side_effect = weka_exc.WekaApiError(
+            status_code=500, reason='nope')
+
+        rule = self._ip_rule()
+        result = drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [rule], [], [])
+        self.assertEqual('error', result[rule['access_id']]['state'])
+
+    # -- Model A: delete -------------------------------------------------
+
+    def test_delete_ip_rule_empties_and_deletes_policies(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        rw = fakes.fake_security_policy(
+            name='manila-share-uu-rw', ips=['10.0.0.1'], uid='pol-rw')
+        ro = fakes.fake_security_policy(
+            name='manila-share-uu-ro', ips=['10.0.0.1'], uid='pol-ro')
+        org.get_security_policy_by_name.side_effect = (
+            lambda name: rw if name.endswith('-rw') else ro)
+
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [],
+            [self._ip_rule()])
+
+        self.assertEqual(2, org.delete_security_policy.call_count)
+        self.assertEqual(2, org.detach_fs_security_policies.call_count)
+
+    def test_delete_ip_rule_keeps_nonempty_policy(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        rw = fakes.fake_security_policy(
+            name='manila-share-uu-rw', ips=['10.0.0.1', '10.0.0.2'])
+        org.get_security_policy_by_name.side_effect = (
+            lambda name: rw if name.endswith('-rw') else None)
+
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [],
+            [self._ip_rule()])
+
+        org.update_security_policy.assert_called_once()
+        org.delete_security_policy.assert_not_called()
+
+    def test_delete_ip_rule_ip_absent_noop(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        rw = fakes.fake_security_policy(
+            name='manila-share-uu-rw', ips=['10.0.0.2'])
+        org.get_security_policy_by_name.side_effect = (
+            lambda name: rw if name.endswith('-rw') else None)
+
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [],
+            [self._ip_rule()])
+
+        org.update_security_policy.assert_not_called()
+        org.delete_security_policy.assert_not_called()
+
+    def test_delete_non_ip_rule_is_noop(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        rule = fakes.fake_access_rule(access_type='user', access_to='bob')
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [], [rule])
+        org.get_security_policy_by_name.assert_not_called()
+
+    # -- Model B: named policy groups ------------------------------------
+
+    def test_update_access_group_share_is_noop_active(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        share = fakes.fake_share(proto='WEKAFS', share_type_id='st-1')
+        rule = self._ip_rule()
+        with mock.patch(_SPEC_PATCH,
+                        return_value={'weka:security_policy_group': 'team-a'}):
+            result = drv.update_access(None, share, [], [rule], [], [])
+        entry = result[rule['access_id']]
+        self.assertEqual('active', entry['state'])
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            entry['access_key'])
+        org.create_security_policy.assert_not_called()
+        org.get_filesystem_by_name.assert_not_called()
+
+    def test_create_share_attaches_group_policies(self):
+        drv = self._make_driver()
+        drv._policy_groups = {
+            'team-a': {'rw': ['10.0.1.0/24'], 'ro': ['10.0.9.0/24']}}
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = None
+        org.create_filesystem.return_value = fakes.fake_filesystem()
+        org.get_security_policy_by_name.return_value = None
+        org.create_security_policy.return_value = fakes.fake_security_policy()
+
+        share = fakes.fake_share(proto='WEKAFS', share_type_id='st-1')
+        with mock.patch(_SPEC_PATCH,
+                        return_value={'weka:security_policy_group': 'team-a'}):
+            drv.create_share(None, share)
+
+        self.assertEqual(2, org.create_security_policy.call_count)
+        self.assertEqual(2, org.attach_fs_security_policies.call_count)
+        names = [c.args[0] for c in org.create_security_policy.call_args_list]
+        self.assertIn('manila-grp-team-a-rw', names)
+        self.assertIn('manila-grp-team-a-ro', names)
+
+    def test_create_share_group_reuses_existing_policy(self):
+        drv = self._make_driver()
+        drv._policy_groups = {'team-a': {'rw': ['10.0.1.0/24']}}
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = None
+        org.create_filesystem.return_value = fakes.fake_filesystem()
+        org.get_security_policy_by_name.return_value = (
+            fakes.fake_security_policy(name='manila-grp-team-a-rw'))
+
+        share = fakes.fake_share(proto='WEKAFS', share_type_id='st-1')
+        with mock.patch(_SPEC_PATCH,
+                        return_value={'weka:security_policy_group': 'team-a'}):
+            drv.create_share(None, share)
+
+        org.create_security_policy.assert_not_called()
+        org.attach_fs_security_policies.assert_called_once()
+
+    def test_create_share_unknown_group_no_attach(self):
+        drv = self._make_driver()
+        drv._policy_groups = {}  # team-a not defined
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = None
+        org.create_filesystem.return_value = fakes.fake_filesystem()
+
+        share = fakes.fake_share(proto='WEKAFS', share_type_id='st-1')
+        with mock.patch(_SPEC_PATCH,
+                        return_value={'weka:security_policy_group': 'team-a'}):
+            drv.create_share(None, share)
+
+        org.create_security_policy.assert_not_called()
+        org.attach_fs_security_policies.assert_not_called()
+
+    # -- _parse_policy_groups -------------------------------------------
+
+    def test_parse_policy_groups_valid(self):
+        g = weka_driver.WekaShareDriver._parse_policy_groups(
+            'team-a:rw:10.0.1.0/24,10.0.2.0/24; team-a:ro:10.0.9.0/24; '
+            'team-b:rw:10.1.0.0/16')
+        self.assertEqual(
+            {'rw': ['10.0.1.0/24', '10.0.2.0/24'], 'ro': ['10.0.9.0/24']},
+            g['team-a'])
+        self.assertEqual({'rw': ['10.1.0.0/16']}, g['team-b'])
+
+    def test_parse_policy_groups_skips_malformed_and_empty(self):
+        g = weka_driver.WekaShareDriver._parse_policy_groups(
+            ' ; bad-entry ; team-a:rw:10.0.0.0/24')
+        self.assertEqual({'team-a': {'rw': ['10.0.0.0/24']}}, g)
+
+    def test_parse_policy_groups_skips_bad_level_and_empty_group(self):
+        g = weka_driver.WekaShareDriver._parse_policy_groups(
+            'team-a:xx:10.0.0.0/24; :rw:10.0.0.0/24')
+        self.assertEqual({}, g)
+
+    def test_parse_policy_groups_none_and_blank(self):
+        self.assertEqual(
+            {}, weka_driver.WekaShareDriver._parse_policy_groups(None))
+        self.assertEqual(
+            {}, weka_driver.WekaShareDriver._parse_policy_groups(''))
+
+    # -- _share_policy_group --------------------------------------------
+
+    def test_share_policy_group_no_type_id(self):
+        drv = self._make_driver()
+        self.assertIsNone(
+            drv._share_policy_group({'id': 's', 'share_type_id': None}))
+
+    def test_share_policy_group_specs_exception(self):
+        drv = self._make_driver()
+        with mock.patch(_SPEC_PATCH, side_effect=Exception('boom')):
+            self.assertIsNone(
+                drv._share_policy_group({'id': 's', 'share_type_id': 't'}))
+
+    def test_share_policy_group_present_and_absent(self):
+        drv = self._make_driver()
+        with mock.patch(_SPEC_PATCH,
+                        return_value={'weka:security_policy_group': 'team-a'}):
+            self.assertEqual(
+                'team-a',
+                drv._share_policy_group({'id': 's', 'share_type_id': 't'}))
+        with mock.patch(_SPEC_PATCH, return_value={}):
+            self.assertIsNone(
+                drv._share_policy_group({'id': 's', 'share_type_id': 't'}))
+
+    # -- delete_share policy cleanup ------------------------------------
+
+    def _delete_share(self, drv):
+        with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
+                               return_value=False):
+            drv.delete_share(None, fakes.fake_share(proto='WEKAFS'))
+
+    def test_delete_share_cleans_up_per_share_policies(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.list_nfs_permissions.return_value = []
+        org.get_security_policy_by_name.return_value = (
+            fakes.fake_security_policy())
+
+        self._delete_share(drv)
+
+        self.assertEqual(2, org.detach_fs_security_policies.call_count)
+        self.assertEqual(2, org.delete_security_policy.call_count)
+
+    def test_delete_share_policy_absent_skips(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.list_nfs_permissions.return_value = []
+        org.get_security_policy_by_name.return_value = None
+
+        self._delete_share(drv)
+
+        org.delete_security_policy.assert_not_called()
+
+    def test_delete_share_policy_delete_notfound_tolerated(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.list_nfs_permissions.return_value = []
+        org.get_security_policy_by_name.return_value = (
+            fakes.fake_security_policy())
+        org.delete_security_policy.side_effect = weka_exc.WekaNotFound(
+            reason='gone')
+
+        self._delete_share(drv)  # must not raise
+        org.delete_filesystem.assert_called_once()
+
+    def test_delete_share_policy_delete_other_error_warns(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.list_nfs_permissions.return_value = []
+        org.get_security_policy_by_name.return_value = (
+            fakes.fake_security_policy())
+        org.delete_security_policy.side_effect = weka_exc.WekaApiError(
+            status_code=500, reason='boom')
+
+        self._delete_share(drv)  # warning only, no raise
+        org.delete_filesystem.assert_called_once()
+
+    def test_delete_share_policy_get_raises_continues(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.list_nfs_permissions.return_value = []
+        org.get_security_policy_by_name.side_effect = Exception('boom')
+
+        self._delete_share(drv)  # must not raise
+        org.delete_security_policy.assert_not_called()
+
+    def test_delete_share_cleanup_error_is_warned(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.list_nfs_permissions.return_value = []
+
+        with mock.patch.object(drv, '_cleanup_wekafs_policies',
+                               side_effect=Exception('boom')):
+            self._delete_share(drv)  # outer try/except swallows it
+
+        org.delete_filesystem.assert_called_once()
+
+    # -- error / tolerance branches -------------------------------------
+
+    def test_apply_ip_rule_add_ip_other_error_sets_error(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        existing = fakes.fake_security_policy(
+            name='manila-share-uu-rw', ips=['10.0.0.9'])
+        org.get_security_policy_by_name.side_effect = (
+            lambda name: existing if name.endswith('-rw') else None)
+        org.update_security_policy.side_effect = weka_exc.WekaApiError(
+            status_code=500, reason='boom')
+
+        rule = self._ip_rule()
+        result = drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [rule], [], [])
+        self.assertEqual('error', result[rule['access_id']]['state'])
+
+    def test_delete_ip_rule_remove_raises_is_warned(self):
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.get_security_policy_by_name.side_effect = Exception('boom')
+
+        # Must not raise; the delete loop logs a warning and continues.
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [],
+            [self._ip_rule()])
+
+    def _delete_single_policy_org(self, drv, **policy_kwargs):
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        rw = fakes.fake_security_policy(
+            name='manila-share-uu-rw', ips=['10.0.0.1'], **policy_kwargs)
+        org.get_security_policy_by_name.side_effect = (
+            lambda name: rw if name.endswith('-rw') else None)
+        return org
+
+    def test_delete_ip_rule_remove_notfound_tolerated(self):
+        drv = self._make_driver()
+        org = self._delete_single_policy_org(drv)
+        org.update_security_policy.side_effect = weka_exc.WekaNotFound(
+            reason='gone')
+
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [],
+            [self._ip_rule()])
+
+        # IP still computed as removed -> policy empty -> deleted.
+        org.delete_security_policy.assert_called_once()
+
+    def test_delete_ip_rule_detach_error_tolerated(self):
+        drv = self._make_driver()
+        org = self._delete_single_policy_org(drv)
+        org.detach_fs_security_policies.side_effect = weka_exc.WekaApiError(
+            status_code=500, reason='boom')
+
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [],
+            [self._ip_rule()])
+
+        org.delete_security_policy.assert_called_once()
+
+    def test_delete_ip_rule_delete_notfound_tolerated(self):
+        drv = self._make_driver()
+        org = self._delete_single_policy_org(drv)
+        org.delete_security_policy.side_effect = weka_exc.WekaNotFound(
+            reason='gone')
+
+        # Must not raise.
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [],
+            [self._ip_rule()])
+
+    def _group_create_share(self, drv):
+        drv._policy_groups = {'team-a': {'rw': ['10.0.1.0/24']}}
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = None
+        org.create_filesystem.return_value = fakes.fake_filesystem()
+        org.get_security_policy_by_name.return_value = None
+        org.create_security_policy.return_value = fakes.fake_security_policy()
+        return org
+
+    def test_create_share_group_attach_conflict_tolerated(self):
+        drv = self._make_driver()
+        org = self._group_create_share(drv)
+        org.attach_fs_security_policies.side_effect = weka_exc.WekaConflict(
+            reason='already attached')
+
+        share = fakes.fake_share(proto='WEKAFS', share_type_id='st-1')
+        with mock.patch(_SPEC_PATCH,
+                        return_value={'weka:security_policy_group': 'team-a'}):
+            drv.create_share(None, share)  # must not raise
+
+        org.create_filesystem.assert_called_once()
+
+    def test_create_share_group_attach_other_error_propagates(self):
+        drv = self._make_driver()
+        org = self._group_create_share(drv)
+        org.attach_fs_security_policies.side_effect = weka_exc.WekaApiError(
+            status_code=500, reason='boom')
+
+        share = fakes.fake_share(proto='WEKAFS', share_type_id='st-1')
+        with mock.patch(_SPEC_PATCH,
+                        return_value={'weka:security_policy_group': 'team-a'}):
+            self.assertRaises(
+                weka_exc.WekaApiError, drv.create_share, None, share)
+
+    def test_delete_share_policy_detach_error_tolerated(self):
+        drv = self._make_driver()
+        drv._client.get_organization_by_name.return_value = (
+            fakes.fake_organization())
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.list_nfs_permissions.return_value = []
+        org.get_security_policy_by_name.return_value = (
+            fakes.fake_security_policy())
+        org.detach_fs_security_policies.side_effect = Exception('boom')
+
+        self._delete_share(drv)  # detach error tolerated, delete proceeds
+        self.assertEqual(2, org.delete_security_policy.call_count)
+
+    # -- _policy_ip (security-policy IP normalization) ------------------
+
+    def test_policy_ip_normalization(self):
+        self.assertEqual(
+            '10.0.1.0/24', weka_driver._policy_ip('10.0.1.0/24'))
+        self.assertEqual('0.0.0.0/0', weka_driver._policy_ip('0.0.0.0/0'))
+        self.assertEqual('192.0.2.1', weka_driver._policy_ip('192.0.2.1'))
+        # host bits are stripped to the network form.
+        self.assertEqual(
+            '10.0.1.0/24', weka_driver._policy_ip('10.0.1.5/24'))
+        self.assertRaises(ValueError, weka_driver._policy_ip, 'notanip')
+
+    def test_apply_cidr_ip_rule_uses_prefix_notation(self):
+        # A CIDR rule must reach the security-policy API in prefix form
+        # (10.0.1.0/24), NOT the NFS dotted-mask form (10.0.1.0/255...).
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.get_security_policy_by_name.return_value = None
+        org.create_security_policy.return_value = (
+            fakes.fake_security_policy())
+
+        rule = self._ip_rule(ip='10.0.1.0/24')
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [rule], [], [])
+
+        _, kwargs = org.create_security_policy.call_args
+        self.assertEqual(['10.0.1.0/24'], kwargs['ips'])
+
+    # -- already-attached (500) tolerance ------------------------------
+
+    def test_is_already_attached_error(self):
+        self.assertTrue(weka_driver._is_already_attached_error(
+            weka_exc.WekaApiError(
+                status_code=500,
+                reason='.../securityPolicy/attach: Cannot add a security '
+                       'policy that is already present in the list')))
+        self.assertFalse(weka_driver._is_already_attached_error(
+            weka_exc.WekaApiError(status_code=500, reason='other error')))
+        self.assertFalse(
+            weka_driver._is_already_attached_error(ValueError('x')))
+
+    def test_apply_ip_rule_attach_already_present_tolerated(self):
+        # A second IP at the same level reuses one policy, so the driver
+        # re-attaches it; Weka returns a 500 "already present" which must
+        # be tolerated (rule stays active).
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        org.get_security_policy_by_name.return_value = None
+        org.create_security_policy.return_value = (
+            fakes.fake_security_policy())
+        org.attach_fs_security_policies.side_effect = weka_exc.WekaApiError(
+            status_code=500,
+            reason='securityPolicy/attach: Cannot add a security policy '
+                   'that is already present in the list')
+
+        rule = self._ip_rule()
+        result = drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [rule], [], [])
+        self.assertEqual('active', result[rule['access_id']]['state'])
+
+    def test_group_attach_already_present_tolerated(self):
+        drv = self._make_driver()
+        org = self._group_create_share(drv)
+        org.attach_fs_security_policies.side_effect = weka_exc.WekaApiError(
+            status_code=500,
+            reason='securityPolicy/attach: Cannot add a security policy '
+                   'that is already present in the list')
+
+        share = fakes.fake_share(proto='WEKAFS', share_type_id='st-1')
+        with mock.patch(_SPEC_PATCH,
+                        return_value={'weka:security_policy_group': 'team-a'}):
+            drv.create_share(None, share)  # must not raise
+        org.create_filesystem.assert_called_once()
 
 
 if __name__ == '__main__':

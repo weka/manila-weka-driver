@@ -166,57 +166,68 @@ for full installation instructions.
 
 ---
 
-## 6. WEKAFS Shares Do Not Support Manila Access Rules
+## 6. WEKAFS Access Control: Scope and Limits
 
 **Affects:** WEKAFS protocol shares only. NFS protocol is unaffected.
 
-**Description:**
-The Manila access-rules API (`share access create`) has no direct mapping
-onto the WekaFS (POSIX client) security model.  Access control is managed
-at the Weka cluster level via per-org filesystem authentication
-(`auth_required=True`) and mount tokens scoped to the project's Weka
-organization (see
-[architecture.md §10](architecture.md#10-per-tenant-wekafs-isolation-via-weka-organizations)).
-Every WEKAFS filesystem is created with `auth_required=True` inside the
-project's own Weka organization; there is no mode in which a WEKAFS
-filesystem can be mounted without a valid org-scoped token.
+**Summary:** WEKAFS shares now enforce per-share access with Weka
+security policies. `ip` access rules are honored and `--access-level`
+(`ro`/`rw`) is enforced. This section documents what is enforced and the
+remaining limits.
 
-Manila IP rules, user rules, etc. have no per-client equivalent in this
-model and the driver does not implement a translation layer for them.
+**How access is enforced (two layers):**
 
-**Impact:**
-Any attempt to add or delete an access rule on a WEKAFS share will return
-an `active` state (the rule is accepted) but has no effect on who can
-mount the filesystem. Access is controlled entirely by whether the client
-holds a valid Weka org token. Example:
+1. **Org boundary (always on).** Every WEKAFS filesystem is created with
+   `auth_required=True` inside the project's own Weka organization, so a
+   client can mount only with an org-scoped token (see
+   [architecture.md §10](architecture.md#10-per-tenant-wekafs-isolation-via-weka-organizations)).
+2. **Per-share IP policy.** On top of the org boundary, the driver maps
+   each `ip` access rule to a Weka per-filesystem **security policy**,
+   which the cluster evaluates at native mount time by the client's
+   source IP:
+   - Once any policy is attached, a client whose IP matches no policy is
+     **denied** the mount (deny-by-default). With no `ip` rule, the share
+     is mountable by any holder of the org token (allow-all within org).
+   - `--access-level ro` installs a read-only policy, so the mount is
+     read-only; `rw` allows writes. (This replaces the previous behavior
+     where `ro` was silently ignored.)
 
-```
-$ openstack share access create my-wekafs-share ip 10.0.0.5
-# Rule shows 'active' but does not grant mount access
-```
+`user`/`cert` rules do not map to an IP policy; they still return the
+self-service mount credential (the `access_key`) so tenants can mint a
+token, but they impose no per-IP restriction.
 
-The rule's `--access-level` (`ro` vs `rw`) is likewise ignored for WEKAFS.
-The driver always provisions a single least-privilege `Regular` mount user
-per org and returns the same `access_key` regardless of the level
-requested, so a rule created with `--access-level ro` still grants the
-tenant full `Regular`-role (read-write) access to that org's data. A
-read-only WEKAFS share is therefore **not** achievable through the Manila
-access-level flag; the value is accepted but has no effect. (For NFS, by
-contrast, `--access-level ro`/`rw` maps directly to the export's RO/RW
-permission and is enforced.)
+Two models (see [configuration.md](configuration.md)):
+- **Model A (default):** per-share policies driven by each share's `ip`
+  rules (`manila-<share8>-rw` / `-ro`).
+- **Model B:** a share type with the `weka:security_policy_group` extra
+  spec attaches shared, reusable group policies defined by
+  `weka_security_policy_group`.
 
-**Workaround:**
-Create a Manila access rule on the WEKAFS share.  The rule's
-`access_key` field carries the mount user's password (self-service,
-no operator step required).  See
+**Limits:**
+
+- **IPv4 only.** IPv6 `ip` rules are rejected with an `error` state.
+- **Client-IP granularity, not per-user.** Access is by source IP/CIDR,
+  not by an authenticated user identity. Two users behind the same IP are
+  indistinguishable (the same is true of the NFS path's `ip` rules). True
+  per-user access would require POSIX ACLs (uid-based, trusts the client)
+  or NFS Kerberos — neither is implemented.
+- **Native mount path only.** Security policies gate the native WEKAFS
+  (POSIX/DPDK) mount. They are **not** evaluated for clients arriving
+  through an NFS/SMB **interface group** (interface hosts are exempt by
+  default and the NFS mount path does not consult filesystem security
+  policies) — NFS access is controlled by NFS client-groups + export
+  permissions instead.
+- **Per-org policy budget.** Weka caps distinct security policies per
+  organization (production: 128) and attached policies per filesystem
+  (16). Model A uses at most two policies per share, so a single
+  project-org supports on the order of ~64–128 access-controlled shares
+  before the budget is exhausted; beyond that, use **Model B** so many
+  shares reuse a small set of shared group policies.
+
+**Self-service credential:** the rule's `access_key` field carries the
+mount user's password (no operator step). See
 [Configuration Guide](configuration.md#self-service-credential-delivery-via-access_key)
 and [§10 below](#10-wekafs-mount-requires-weka-user-login-cli-step).
-Control network-layer access via VPC security groups or firewall rules.
-
-**Future work:**
-A future implementation could map Manila IP rules to Weka NFS-style client
-groups on the WekaFS mount path, or map user rules to Weka user account
-permissions. This is tracked as a future enhancement.
 
 ---
 

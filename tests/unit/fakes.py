@@ -136,6 +136,21 @@ def fake_client_group(uid=FAKE_CG_UID, name='manila-abcd1234-efgh5678'):
     return {'uid': uid, 'name': name}
 
 
+FAKE_POLICY_UID = 'pol-uid-eeee'
+
+
+def fake_security_policy(uid=FAKE_POLICY_UID, name='manila-shareuui-rw',
+                         ips=None, action='Allow', read_only=False):
+    """A Weka security policy as returned by the v2 REST API."""
+    return {
+        'uid': uid,
+        'name': name,
+        'action': action,
+        'ip': list(ips or []),
+        'read_only': read_only,
+    }
+
+
 def fake_client_group_detail(uid=FAKE_CG_UID,
                              name='manila-abcd1234-efgh5678',
                              rules=None):
@@ -188,7 +203,8 @@ FAKE_CG_RULE_UID = 'rule-uid-cccc'
 
 
 def fake_share(share_id=FAKE_SHARE_ID, size=10, proto='WEKAFS',
-               export_locations=None, project_id=FAKE_PROJECT_ID):
+               export_locations=None, project_id=FAKE_PROJECT_ID,
+               share_type_id=None):
     if export_locations is None:
         export_locations = [{
             'path': 'weka-host/{}'.format('manila_' + share_id),
@@ -205,6 +221,7 @@ def fake_share(share_id=FAKE_SHARE_ID, size=10, proto='WEKAFS',
         'export_locations': export_locations,
         'display_name': 'test-share',
         'project_id': project_id,
+        'share_type_id': share_type_id,
     }
 
 

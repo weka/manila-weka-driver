@@ -294,3 +294,55 @@ Requirements:
 
 4. **Network segmentation**: The Manila host should access Weka on a
    dedicated management VLAN, separate from the data network.
+
+## WEKAFS Per-Share Access Control (Security Policies)
+
+WEKAFS shares are always isolated at the org boundary (a token is required
+to mount). On top of that, the driver enforces **per-share** access with
+Weka per-filesystem security policies, evaluated at native mount time by
+the client's source IP. See
+[known-issues.md §6](known-issues.md#6-wekafs-access-control-scope-and-limits)
+for the enforcement model and limits (IPv4-only, client-IP granularity,
+native-mount-only, per-org policy budget).
+
+### Model A — per-share rules (default, no configuration)
+
+Create `ip` access rules on the share; the driver maps each to a per-share
+`Allow` policy and honors the access level:
+
+```bash
+# Only 10.0.1.0/24 may mount read-write; everyone else is denied.
+openstack share access create my-wekafs-share ip 10.0.1.0/24 --access-level rw
+# 10.0.9.0/24 may mount read-only.
+openstack share access create my-wekafs-share ip 10.0.9.0/24 --access-level ro
+```
+
+A `user` rule (e.g. `... user weka`) does not create an IP policy; it just
+returns the self-service mount credential (`access_key`).
+
+### Model B — named policy groups (reused across shares)
+
+Define reusable access profiles in `manila.conf` and select one per share
+type. Many shares then share the same policy objects, which keeps a large
+share count within the per-org policy budget.
+
+```ini
+[weka]
+# Semicolon-separated "<group>:<rw|ro>:<cidr[,cidr...]>" entries.
+weka_security_policy_group = team-a:rw:10.0.1.0/24,10.0.2.0/24; team-a:ro:10.0.9.0/24; team-b:rw:10.1.0.0/16
+```
+
+```bash
+# Wire a share type to the "team-a" group.
+openstack share type create wekafs-team-a False --public True
+openstack share type set wekafs-team-a \
+    --extra-specs share_backend_name=weka \
+                  weka:security_policy_group=team-a
+
+# Every share of this type is created with team-a's policies attached.
+openstack share create WEKAFS 100 --share-type wekafs-team-a --name proj-share-1
+```
+
+To change who may access a group, edit `weka_security_policy_group` (the
+driver reconciles the shared policy) — all shares of the type are affected
+at once.
