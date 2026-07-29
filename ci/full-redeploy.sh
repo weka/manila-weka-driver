@@ -192,7 +192,7 @@ if [ -d "${WEKA_REPO}/ci" ]; then
     for f in ci-runner.sh post-results.sh collect-logs.sh \
              gerrit-listener.py tempest-include.txt tempest-exclude.txt \
              local.conf.template \
-             run-tempest.sh; do
+             run-tempest.sh weka-org-cleanup.sh; do
         [ -f "${WEKA_REPO}/ci/${f}" ] && cp "${WEKA_REPO}/ci/${f}" "${CI_DIR}/"
     done
     chmod +x "${CI_DIR}"/*.sh "${CI_DIR}"/*.py 2>/dev/null || true

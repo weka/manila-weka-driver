@@ -356,9 +356,13 @@ Orgs are never torn down automatically.
 
 **Impact:**
 Over time, projects that have had all their shares deleted leave behind
-empty Weka organizations. These do not affect cluster operation or
-capacity, but they accumulate in the Weka management UI and API response
-payloads.
+empty Weka organizations. These do not usually affect cluster operation
+or capacity, but they accumulate in the Weka management UI and API
+response payloads. At sufficient scale they exhaust the cluster's tenant
+table: once it is full, every new WEKAFS share create fails with
+`Could not create tenant: Tenant table is full` (a `WekaOrgError`), which
+tips a whole batch of share creates into cascading `ERROR` status. This
+is most visible in CI, which churns through many ephemeral projects.
 
 **Cleanup:**
 Identify empty orgs (no filesystems) in the Weka management console
@@ -366,12 +370,19 @@ under **Organizations**. It is safe to delete any org matching the
 `weka_org_prefix` pattern (default `manila-`) that has no filesystems
 and does not correspond to an active Manila project.
 
-Via the Weka CLI:
+Via the Weka CLI (`weka org` is a deprecated alias for `weka tenant`):
 
 ```bash
-weka org list
-weka org delete <org-name>
+weka tenant                       # list all tenants (orgs)
+weka tenant remove <name> --force # delete one by name or ID
 ```
+
+**CI:** the third-party CI reaps leftover `manila-*` orgs automatically
+before every tempest run (`ci/weka-org-cleanup.sh`, invoked as Phase 4.5
+of `ci/ci-runner.sh`), so the tenant table stays clear between runs and
+the "Tenant table is full" cascade does not recur. The reaper uses the
+`weka` CLI's own cached session (no password login, so it neither trips
+nor is tripped by the login-lockout in issue #13) and is non-fatal.
 
 ---
 

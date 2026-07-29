@@ -224,6 +224,16 @@ for snap_id in $(timeout 30 openstack share snapshot list -f value -c ID 2>/dev/
     fi
 done
 
+# ── Phase 4.5: Reap leftover Weka orgs ────────────────────────────────────────
+# WEKAFS per-tenant isolation retains a project's Weka org on last-share delete
+# (by design). Tempest's ephemeral projects therefore accumulate orgs every
+# run until the cluster tenant table fills and WEKAFS share creates fail with
+# "Tenant table is full". Reap leftover manila-* orgs before tempest, when no
+# share is live. Non-fatal: never fails a build.
+
+log "Phase 4.5: Reaping leftover Weka orgs"
+"${CI_DIR}/weka-org-cleanup.sh" || true
+
 # ── Phase 5: Run tempest ─────────────────────────────────────────────────────
 
 log "Phase 5: Running tempest tests"

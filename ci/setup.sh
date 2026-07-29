@@ -80,6 +80,7 @@ cp "${SCRIPT_DIR}/ci-runner.sh" /opt/weka-ci/
 cp "${SCRIPT_DIR}/post-results.sh" /opt/weka-ci/
 cp "${SCRIPT_DIR}/collect-logs.sh" /opt/weka-ci/
 cp "${SCRIPT_DIR}/full-redeploy.sh" /opt/weka-ci/
+cp "${SCRIPT_DIR}/weka-org-cleanup.sh" /opt/weka-ci/
 cp "${SCRIPT_DIR}/local.conf.template" /opt/weka-ci/
 cp "${SCRIPT_DIR}/tempest-include.txt" /opt/weka-ci/
 chmod +x /opt/weka-ci/*.sh /opt/weka-ci/*.py
