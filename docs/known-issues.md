@@ -407,7 +407,66 @@ tenants.
 
 ---
 
-## 13. `manage_existing` Is Not Supported for WEKAFS Shares
+## 13. CI Cluster Hardening (Operator Actions)
+
+**Context:** The third-party CI (ci/full-redeploy.sh) connects to a live Weka
+cluster.  The following one-time operator steps reduce failures in that
+environment.  None of them are required for production driver deployments.
+
+**1. Dedicated CI user**
+
+Create a Weka user specifically for CI rather than reusing the shared `admin`
+account.  Isolating CI login churn protects the real admin account from
+lockouts triggered by rapid redeployments.
+
+```bash
+# On the Weka cluster (as admin):
+weka user add ci-manila --role RegularUser --org Root
+# (grant ClusterAdmin or OrgAdmin as required by your test scope)
+weka user update ci-manila --role ClusterAdmin
+```
+
+Set the credentials in `/opt/weka-ci/ci-env` on the CI VM:
+
+```bash
+WEKA_USERNAME=ci-manila
+WEKA_PASSWORD=<ci-user-password>
+```
+
+**2. Raise the login-attempt lockout threshold**
+
+Rapid DevStack redeploys cause multiple backend processes to authenticate
+in quick succession.  Increasing (or temporarily disabling) the cluster's
+per-user lockout threshold prevents the lockout cascade that stalls gateway
+discovery.
+
+```bash
+# Show current policy
+weka security login-lockout status
+# Raise the failed-attempt threshold (example: 20 attempts, 1-minute window)
+weka security login-lockout set --failed-login-attempts 20 \
+    --lockout-time 60
+```
+
+> Verify the exact subcommand and flag names against your cluster's Weka
+> version (`weka security --help`); the lockout-policy CLI has varied across
+> 5.x releases.
+
+**3. Pin the NFS gateway IP (optional fallback)**
+
+If Weka CLI gateway discovery is unreliable in the CI environment (e.g. CLI
+auth is slow), pin a known-good gateway IP in `/opt/weka-ci/ci-env`:
+
+```bash
+WEKA_NFS_SERVER=<nfs-gateway-ip>
+```
+
+full-redeploy.sh will use this value when live discovery returns nothing,
+instead of leaving `weka_nfs_server` unconfigured.
+
+---
+
+## 14. `manage_existing` Is Not Supported for WEKAFS Shares
 
 **Affects:** `manage_existing` for WEKAFS protocol shares. NFS shares can
 still be managed.
