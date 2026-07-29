@@ -408,6 +408,7 @@ cd ci/
 | `ci/post-results.sh` | Posts pass/fail results to Gerrit |
 | `ci/collect-logs.sh` | Collects and compresses logs for the log server |
 | `ci/full-redeploy.sh` | Tears down and rebuilds DevStack (nightly) |
+| `ci/weka-org-cleanup.sh` | Reaps leftover `manila-*` Weka orgs before each run (keeps the tenant table clear) |
 | `ci/ci-status.sh` | Generates a status report to share with reviewers |
 
 ### Monitoring
