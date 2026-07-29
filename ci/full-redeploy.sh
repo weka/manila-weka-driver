@@ -38,6 +38,34 @@ if ! flock -w 1800 9; then
 fi
 log "Lock acquired"
 
+# ── Self-update: refresh the weka repo clone, then re-exec if this script
+#    changed.  Runs only on the first exec (WEKA_REDEPLOY_REEXEC != 1).
+#    Any failure here is non-fatal: just log a warning and continue. ──────────
+
+WEKA_REPO="/opt/stack/manila-weka-driver"
+
+if [ "${WEKA_REDEPLOY_REEXEC:-}" != "1" ]; then
+    # Refresh the weka driver repo so CI scripts and driver code are latest.
+    git -C "$WEKA_REPO" fetch --quiet origin \
+        && git -C "$WEKA_REPO" reset --hard origin/main \
+        || log "WARNING: could not refresh weka repo clone; \
+continuing with current revision"
+
+    # Re-exec this script if a newer copy exists in the repo.
+    _NEW_SCRIPT="${WEKA_REPO}/ci/full-redeploy.sh"
+    _SELF="/opt/weka-ci/full-redeploy.sh"
+    if [ -f "$_NEW_SCRIPT" ] && ! diff -q "$_NEW_SCRIPT" "$_SELF" \
+            >/dev/null 2>&1; then
+        log "full-redeploy.sh updated; copying and re-execing..."
+        cp "$_NEW_SCRIPT" "$_SELF" \
+            || { log "WARNING: could not copy updated script; continuing"; }
+        if [ -x "$_SELF" ]; then
+            exec env WEKA_REDEPLOY_REEXEC=1 bash "$_SELF" "$@"
+        fi
+    fi
+    unset _NEW_SCRIPT _SELF
+fi
+
 # Release the lock and bring the listener back on ANY exit, so a failed
 # redeploy never leaves the CI offline (it once stayed down for weeks).
 LISTENER_STOPPED=0
@@ -107,7 +135,7 @@ fi
 # runs too late for this run's local.conf — without this each run would use the
 # PREVIOUS run's template (one run stale), which once re-introduced a removed
 # secret line. The clone survives teardown (only manila/tempest/data are rm'd).
-WEKA_REPO="/opt/stack/manila-weka-driver"
+# (WEKA_REPO is set in the self-update block at the top of the script.)
 if [ -f "${WEKA_REPO}/ci/local.conf.template" ]; then
     cp "${WEKA_REPO}/ci/local.conf.template" "${CI_DIR}/local.conf.template"
 fi
@@ -134,7 +162,7 @@ fi
 
 # Refresh job-side CI scripts from the freshly-deployed repo so the VM
 # never runs stale copies (a stale ci-runner.sh once broke every job).
-WEKA_REPO="/opt/stack/manila-weka-driver"
+# (WEKA_REPO is set in the self-update block at the top of the script.)
 if [ -d "${WEKA_REPO}/ci" ]; then
     log "Refreshing CI scripts from ${WEKA_REPO}/ci"
     for f in ci-runner.sh post-results.sh collect-logs.sh \
@@ -333,13 +361,22 @@ done
 unset _attempt _raw
 set -e
 
+# Operator-pinned fallback: if discovery failed, use WEKA_NFS_SERVER from
+# ci-env as a safety net.  This lets the operator hard-code a known-good
+# gateway IP without touching deployment code.
+if [ -z "$GW_IP" ] && [ -n "${WEKA_NFS_SERVER:-}" ]; then
+    log "Weka NFS gateway not discovered; falling back to" \
+        "WEKA_NFS_SERVER=${WEKA_NFS_SERVER} from ci-env"
+    GW_IP="$WEKA_NFS_SERVER"
+fi
+
 if [ -n "$GW_IP" ]; then
     if [ "$GW_IP" = "${WEKA_API_SERVER:-}" ]; then
         log "WARNING: discovered weka_nfs_server=${GW_IP} equals the Weka API" \
             "host — this is likely the management IP, not an NFS gateway;" \
             "create_share_from_snapshot may fail"
     else
-        log "Weka NFS gateway discovered at ${GW_IP}; setting weka_nfs_server on both backends"
+        log "Weka NFS gateway at ${GW_IP}; setting weka_nfs_server on both backends"
     fi
     set +u
     source "${DEVSTACK_DIR}/functions"
@@ -347,8 +384,9 @@ if [ -n "$GW_IP" ]; then
     iniset /etc/manila/manila.conf weka_wekafs weka_nfs_server "$GW_IP"
     set -u
 else
-    log "WARNING: no UP Weka NFS gateway found after 3 attempts;" \
-        "weka_nfs_server left unconfigured (create_share_from_snapshot will fail)"
+    log "WARNING: no UP Weka NFS gateway found after 5 attempts and no" \
+        "WEKA_NFS_SERVER fallback; weka_nfs_server left unconfigured" \
+        "(create_share_from_snapshot will fail)"
 fi
 
 # Restart manila-share unconditionally so the post-stack weka_password (and
@@ -356,6 +394,79 @@ fi
 # here rather than in local.conf, the backend can only authenticate after this
 # restart — it must NOT depend on gateway discovery (which is best-effort).
 sudo systemctl restart devstack@m-shr 2>&1 || true
+
+# ── Post-deploy HEALTH GATE ───────────────────────────────────────────────────
+# Informational: never exit non-zero here (the listener must still start so
+# failures are reported), but be LOUD so errors are greppable in redeploy.log.
+_health_check() {
+    # Returns 0 (healthy) or 1 (degraded). Prints reason on failure.
+
+    # 1. Both backends must appear in share pool list.
+    set +u
+    source "${DEVSTACK_DIR}/openrc" admin admin >/dev/null 2>&1
+    set -u
+    local _pools
+    _pools=$(openstack share pool list --detail 2>/dev/null || true)
+    if ! echo "$_pools" | grep -q "weka_nfs"; then
+        echo "weka_nfs backend not in share pool list"
+        return 1
+    fi
+    if ! echo "$_pools" | grep -q "weka_wekafs"; then
+        echo "weka_wekafs backend not in share pool list"
+        return 1
+    fi
+
+    # 2. weka_nfs_server must be set (non-empty) in both sections.
+    local _nfs_srv_nfs _nfs_srv_wfs
+    _nfs_srv_nfs=$(grep -A20 '^\[weka_nfs\]' /etc/manila/manila.conf \
+        | grep 'weka_nfs_server' | head -1 | awk -F'=' '{print $2}' \
+        | tr -d ' ' || true)
+    _nfs_srv_wfs=$(grep -A20 '^\[weka_wekafs\]' /etc/manila/manila.conf \
+        | grep 'weka_nfs_server' | head -1 | awk -F'=' '{print $2}' \
+        | tr -d ' ' || true)
+    if [ -z "$_nfs_srv_nfs" ] || [ -z "$_nfs_srv_wfs" ]; then
+        echo "weka_nfs_server missing in manila.conf" \
+             "(weka_nfs='${_nfs_srv_nfs}' weka_wekafs='${_nfs_srv_wfs}')"
+        return 1
+    fi
+
+    echo "$_nfs_srv_nfs"   # used as the IP in the success log line
+    return 0
+}
+
+log "Running post-deploy health gate (up to 90s)..."
+set +e
+_hg_ok=0
+for _hg_attempt in 1 2; do
+    _hg_deadline=$((SECONDS + 90))
+    while [ "$SECONDS" -lt "$_hg_deadline" ]; do
+        _hg_result=$(_health_check 2>&1)
+        _hg_rc=$?
+        if [ "$_hg_rc" -eq 0 ]; then
+            _hg_ok=1
+            break
+        fi
+        sleep 5
+    done
+    if [ "$_hg_ok" -eq 1 ]; then
+        break
+    fi
+    if [ "$_hg_attempt" -eq 1 ]; then
+        log "ERROR: post-deploy health gate FAILED: ${_hg_result}"
+        log "Performing one additional manila-share restart..."
+        sudo systemctl restart devstack@m-shr 2>&1 || true
+    fi
+done
+set -e
+
+if [ "$_hg_ok" -eq 1 ]; then
+    log "Health gate OK: both backends up, weka_nfs_server=${_hg_result}"
+else
+    log "ERROR: CI deploy is DEGRADED — health gate failed after restart:" \
+        "${_hg_result}"
+    log "ERROR: Tempest runs will likely fail until this is resolved."
+fi
+unset _hg_ok _hg_attempt _hg_deadline _hg_result _hg_rc
 
 # Verify (informational; never fail the redeploy on a query hiccup)
 openstack share service list || true
