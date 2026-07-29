@@ -124,6 +124,98 @@ class TestWekaApiClientAuth(unittest.TestCase):
         with mock.patch.object(c._session, 'post', return_value=resp):
             self.assertRaises(weka_exc.WekaAuthError, c.login)
 
+    def test_login_lockout_403_backs_off_and_raises(self):
+        """403 lockout → sleeps capped duration then raises WekaApiError."""
+        c = self._make_client()
+        resp = _make_response(
+            403, {'message': 'locked out for 2 minutes'})
+        with mock.patch.object(c._session, 'post', return_value=resp):
+            with mock.patch('time.sleep') as mock_sleep:
+                with self.assertRaises(weka_exc.WekaApiError) as ctx:
+                    c.login()
+        # 2 minutes = 120 s, +5 guard, capped at 150 → expects 125
+        mock_sleep.assert_called_once_with(125)
+        self.assertEqual(403, ctx.exception.status_code)
+
+    def test_login_lockout_seconds_backed_off_and_capped(self):
+        """403 lockout with a large second count is capped at 150 s."""
+        c = self._make_client()
+        resp = _make_response(
+            403, {'message': 'Locked Out for 200 seconds'})
+        with mock.patch.object(c._session, 'post', return_value=resp):
+            with mock.patch('time.sleep') as mock_sleep:
+                self.assertRaises(weka_exc.WekaApiError, c.login)
+        # 200+5=205, capped to 150
+        mock_sleep.assert_called_once_with(150)
+
+    def test_login_non_lockout_403_raises_without_sleep(self):
+        """A 403 that is NOT a lockout should raise without sleeping."""
+        c = self._make_client()
+        resp = _make_response(403, {'message': 'forbidden'})
+        with mock.patch.object(c._session, 'post', return_value=resp):
+            with mock.patch('time.sleep') as mock_sleep:
+                self.assertRaises(weka_exc.WekaApiError, c.login)
+        mock_sleep.assert_not_called()
+
+    def test_login_success_no_sleep(self):
+        """A successful login must never call time.sleep."""
+        c = self._make_client()
+        with mock.patch.object(c._session, 'post',
+                               return_value=_login_response()):
+            with mock.patch('time.sleep') as mock_sleep:
+                c.login()
+        mock_sleep.assert_not_called()
+
+    def test_login_lockout_non_json_403_raises_without_sleep(self):
+        """A 403 whose body is not valid JSON is not treated as a lockout."""
+        c = self._make_client()
+        resp = mock.Mock()
+        resp.status_code = 403
+        resp.json.side_effect = ValueError('not json')
+        resp.text = 'forbidden'
+        with mock.patch.object(c._session, 'post', return_value=resp):
+            with mock.patch('time.sleep') as mock_sleep:
+                self.assertRaises(weka_exc.WekaApiError, c.login)
+        mock_sleep.assert_not_called()
+
+    def test_parse_lockout_seconds_no_match_returns_none(self):
+        """_parse_lockout_seconds returns None when no duration pattern."""
+        c = self._make_client()
+        result = c._parse_lockout_seconds('some other error message')
+        self.assertIsNone(result)
+
+    def test_parse_lockout_compact_and_bare_forms(self):
+        """_parse_lockout_seconds handles 1m55s / 2m / 90s forms."""
+        c = self._make_client()
+        self.assertEqual(
+            115, c._parse_lockout_seconds('locked out for another 1m55s'))
+        self.assertEqual(120, c._parse_lockout_seconds('locked out for 2m'))
+        self.assertEqual(90, c._parse_lockout_seconds('locked out for 90s'))
+
+    def test_login_lockout_real_data_key_backs_off(self):
+        """Real Weka body carries the lockout under 'data' in 1m55s form."""
+        c = self._make_client()
+        resp = _make_response(403, {
+            'data': 'Authentication Failed. User has been locked out for '
+                    'another 1m55s due to too many login attempts'})
+        with mock.patch.object(c._session, 'post', return_value=resp):
+            with mock.patch('time.sleep') as mock_sleep:
+                with self.assertRaises(weka_exc.WekaApiError) as ctx:
+                    c.login()
+        # 1m55s = 115 s, +5 guard = 120
+        mock_sleep.assert_called_once_with(120)
+        self.assertEqual(403, ctx.exception.status_code)
+
+    def test_login_lockout_unparseable_duration_uses_default(self):
+        """A lockout with no parseable duration backs off a safe default."""
+        c = self._make_client()
+        resp = _make_response(403, {'data': 'user account is locked out'})
+        with mock.patch.object(c._session, 'post', return_value=resp):
+            with mock.patch('time.sleep') as mock_sleep:
+                self.assertRaises(weka_exc.WekaApiError, c.login)
+        # unparseable -> 125 default + 5 = 130
+        mock_sleep.assert_called_once_with(130)
+
     def test_request_refreshes_token_on_401(self):
         c = self._make_client()
         c._access_token = 'old-token'

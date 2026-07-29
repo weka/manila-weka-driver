@@ -251,8 +251,43 @@ class WekaApiClient(object):
         with self._token_lock:
             self._do_login()
 
+    @staticmethod
+    def _parse_lockout_seconds(body_text):
+        """Best-effort parse of a lockout duration (seconds) from a 403 body.
+
+        Weka phrases the lockout several ways, e.g. "locked out for 2 minutes",
+        "locked out for 90 seconds", or the compact "locked out for another
+        1m55s". Returns the duration in seconds, or None if unparseable (the
+        caller then falls back to a safe fixed backoff). Case-insensitive.
+        """
+        import re
+        low = (body_text or '').lower()
+        # Compact "1m55s" / "2m" / "90s" form (check first — most specific).
+        m = re.search(r'(\d+)\s*m\s*(\d+)\s*s', low)
+        if m:
+            return int(m.group(1)) * 60 + int(m.group(2))
+        m = re.search(r'(\d+)\s*minute', low)
+        if m:
+            return int(m.group(1)) * 60
+        m = re.search(r'(\d+)\s*second', low)
+        if m:
+            return int(m.group(1))
+        m = re.search(r'(\d+)\s*m\b', low)
+        if m:
+            return int(m.group(1)) * 60
+        m = re.search(r'(\d+)\s*s\b', low)
+        if m:
+            return int(m.group(1))
+        return None
+
     def _do_login(self):
-        """Inner login — must be called with _token_lock held."""
+        """Inner login — must be called with _token_lock held.
+
+        On a 403 "locked out" response, backs off for the remainder of the
+        lockout window (capped at 150 s) before raising so that successive
+        login attempts from Manila's init_host retry loop are spaced out
+        past the lockout and the cluster can clear it.
+        """
         LOG.debug("Logging in to Weka cluster at %s as user '%s' org '%s'",
                   self._host, self._username, self._organization)
         payload = {
@@ -266,6 +301,28 @@ class WekaApiClient(object):
             verify=self._ssl_verify,
             timeout=self._timeout,
         )
+        # Detect login-lockout (403 with "locked out" in the body) BEFORE
+        # calling _raise_for_status so we can back off, preventing the
+        # init_host retry loop from perpetuating the lockout. Use the raw
+        # body text: Weka puts the message under varying keys (e.g. 'data'),
+        # so scanning the whole body is more robust than probing keys.
+        if resp.status_code == 403:
+            body_text = resp.text or ''
+            if 'locked out' in body_text.lower():
+                duration = self._parse_lockout_seconds(body_text)
+                # Unparseable duration -> fall back to 125s (past a typical
+                # ~2 minute lockout) so we still space attempts out.
+                backoff = min((duration or 125) + 5, 150)
+                LOG.warning(
+                    "Weka login locked out (~%ss); backing off %ds before "
+                    "failing so the lockout can clear",
+                    duration if duration is not None else 'unknown', backoff,
+                )
+                time.sleep(backoff)
+                raise exceptions.WekaApiError(
+                    status_code=403,
+                    reason='/login: {}'.format(body_text),
+                )
         self._raise_for_status(resp, context='/login')
         data = resp.json().get('data', resp.json())
         self._access_token = data['access_token']
