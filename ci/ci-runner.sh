@@ -152,6 +152,9 @@ if ! grep -q "'WEKAFS'" "$CONSTANTS_FILE" 2>/dev/null; then
     log "Patched WEKAFS into SUPPORTED_SHARE_PROTOCOLS"
 fi
 
+# (The WEKAFS tempest subclass is injected by run-tempest.sh just before the
+# test passes; no need to inject here too.)
+
 # Install Manila (with whatever driver is now in place) into the venv
 log "Installing Manila dependencies..."
 sudo rm -rf manila.egg-info 2>/dev/null || true
@@ -228,11 +231,12 @@ cd "$TEMPEST_DIR" || fail "Tempest directory not found at ${TEMPEST_DIR}"
 
 TEMPEST_START=$(date +%s)
 
-timeout "$TIMEOUT_TEMPEST" tempest run \
-    --include-list "${CI_DIR}/tempest-include.txt" \
-    --concurrency 1 \
-    2>&1 | tee "${LOG_DIR}/tempest.log"
-TEMPEST_RC=${PIPESTATUS[0]}
+LOG_DIR="$LOG_DIR" \
+    INCLUDE_LIST="${CI_DIR}/tempest-include.txt" \
+    TIMEOUT_TEMPEST="$TIMEOUT_TEMPEST" \
+    CI_DIR="$CI_DIR" \
+    "${CI_DIR}/run-tempest.sh"
+TEMPEST_RC=$?
 
 TEMPEST_END=$(date +%s)
 TEMPEST_DURATION=$((TEMPEST_END - TEMPEST_START))
