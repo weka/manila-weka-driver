@@ -25,6 +25,30 @@ exec > >(tee "$LOG_FILE") 2>&1
 
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*"; }
 
+# manila-share worker children reparent to init and SURVIVE a `systemctl
+# stop`/`restart`, becoming orphan generations that double-process RPCs
+# (symptoms: "name already exists" on snapshot create, capabilities races).
+# Reap any reparented workers so exactly one generation runs.
+_manila_kill_orphans() {
+    local _n=0
+    while pgrep -f 'venv/bin/[m]anila-share' >/dev/null 2>&1 \
+            && [ "$_n" -lt 15 ]; do
+        sudo pkill -9 -f 'venv/bin/[m]anila-share' 2>/dev/null || true
+        sleep 1
+        _n=$((_n + 1))
+    done
+}
+
+# Restart manila-share as a SINGLE clean generation (stop, reap orphans,
+# start) so post-stack restarts never leave a stale generation behind.
+_restart_manila_single_gen() {
+    sudo systemctl stop devstack@m-shr 2>&1 || true
+    sleep 2
+    _manila_kill_orphans
+    sudo systemctl reset-failed devstack@m-shr 2>/dev/null || true
+    sudo systemctl start devstack@m-shr 2>&1 || true
+}
+
 log "=== Starting full DevStack redeploy ==="
 
 # ── Acquire lock (wait for any running CI job to finish) ──────────────────────
@@ -281,6 +305,8 @@ log "Setting Weka credential in manila.conf (untraced)"
 # and trip the login lockout (403 "locked out for N s") that empties gateway
 # discovery. It is restarted once, cleanly, at the end of this block.
 sudo systemctl stop devstack@m-shr 2>&1 || true
+sleep 2
+_manila_kill_orphans   # reap reparented workers so none linger during discovery
 set +u
 source "${DEVSTACK_DIR}/functions"
 { set +x; } 2>/dev/null
@@ -393,7 +419,7 @@ fi
 # weka_nfs_server, when discovered) take effect. Since weka_password is now set
 # here rather than in local.conf, the backend can only authenticate after this
 # restart — it must NOT depend on gateway discovery (which is best-effort).
-sudo systemctl restart devstack@m-shr 2>&1 || true
+_restart_manila_single_gen
 
 # ── Post-deploy HEALTH GATE ───────────────────────────────────────────────────
 # Informational: never exit non-zero here (the listener must still start so
@@ -454,7 +480,7 @@ for _hg_attempt in 1 2; do
     if [ "$_hg_attempt" -eq 1 ]; then
         log "ERROR: post-deploy health gate FAILED: ${_hg_result}"
         log "Performing one additional manila-share restart..."
-        sudo systemctl restart devstack@m-shr 2>&1 || true
+        _restart_manila_single_gen
     fi
 done
 set -e
