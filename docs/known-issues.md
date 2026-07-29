@@ -192,9 +192,9 @@ remaining limits.
      read-only; `rw` allows writes. (This replaces the previous behavior
      where `ro` was silently ignored.)
 
-`user`/`cert` rules do not map to an IP policy; they still return the
-self-service mount credential (the `access_key`) so tenants can mint a
-token, but they impose no per-IP restriction.
+`user`/`cert` rules do not map to an IP policy; they are returned as
+`active` but impose no per-IP restriction. The mount credential is in
+export-location metadata (`weka_mount_password`).
 
 Two models (see [configuration.md](configuration.md)):
 - **Model A (default):** per-share policies driven by each share's `ip`
@@ -224,9 +224,9 @@ Two models (see [configuration.md](configuration.md)):
   before the budget is exhausted; beyond that, use **Model B** so many
   shares reuse a small set of shared group policies.
 
-**Self-service credential:** the rule's `access_key` field carries the
-mount user's password (no operator step). See
-[Configuration Guide](configuration.md#self-service-credential-delivery-via-access_key)
+**Self-service credential:** the mount user's password is in the share's
+export-location metadata as `weka_mount_password` (no operator step). See
+[Configuration Guide](configuration.md#self-service-credential-delivery-via-export-location-metadata)
 and [§10 below](#10-wekafs-mount-requires-weka-user-login-cli-step).
 
 ---
@@ -312,10 +312,10 @@ project's Weka organization. A client cannot mount the share until it
 has used `weka user login` to obtain a token file and passed that file
 via the `auth_token_path` mount option.
 
-The driver now delivers the mount credential self-service: when a
-tenant creates a Manila access rule on a WEKAFS share, the rule's
-**access_key** field contains the Regular mount user's password
-(derived from `HMAC-SHA256(weka_org_admin_secret, project_id + ":mount")`,
+The driver now delivers the mount credential self-service: when a WEKAFS
+share is created, the Regular mount user's password is placed in the
+share's export-location metadata as **`weka_mount_password`** (derived
+from `HMAC-SHA256(weka_org_admin_secret, project_id + ":mount")`,
 then formatted to meet Weka password complexity — not the raw digest).
 No operator or out-of-band secret distribution is required.
 
@@ -327,14 +327,13 @@ not a Manila limitation.
 
 **Workflow:**
 ```bash
-# 1. Create share and access rule; retrieve the mount credential
+# 1. Create share; retrieve the mount credential from export metadata
 openstack share create WEKAFS 100 --name myshare --share-type weka
-openstack share access create myshare user weka
-KEY=$(openstack share access list myshare \
-        -f value -c "Access Key" | head -1)
+KEY=$(openstack share show myshare -f json \
+        | jq -r '.export_locations[0].metadata.weka_mount_password')
 
 # 2. Log in to the per-project Weka org
-#    weka_org_name and weka_org_user visible in export-location metadata
+#    weka_org_name and weka_org_user also in export-location metadata
 weka user login manila-mnt "$KEY" --org <weka_org_name> -H <api-host>
 # Writes ~/.weka/auth-token.json
 
@@ -395,9 +394,9 @@ cluster for existing orgs.
 **Impact:**
 - All subsequent driver operations on existing WEKAFS shares fail with
   an authentication error (TenantAdmin password mismatch).
-- Tenants whose existing access rules carried the old mount credential
-  (via `access_key`) must re-fetch the new `access_key` and re-run
-  `weka user login` — their cached auth-token.json is invalid.
+- Tenants must re-fetch the new `weka_mount_password` from export-location
+  metadata and re-run `weka user login` — their cached auth-token.json
+  is invalid.
 
 **Recovery:**
 After rotating the secret, update both user passwords for each existing

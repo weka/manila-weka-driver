@@ -169,23 +169,22 @@ The driver creates **two** Weka users inside each per-project org:
 
 > **Note:** the stored password is not the raw HMAC hex digest — the
 > driver formats the digest to satisfy Weka's password-complexity rules.
-> The mount-user password is delivered to tenants via the access_key
-> (below), so it rarely needs to be recomputed by hand.
+> The mount-user password is placed in export-location metadata as
+> `weka_mount_password` when the share is created.
 
-### Self-service credential delivery via access_key
+### Self-service credential delivery via export-location metadata
 
-When a tenant creates a Manila access rule on a WEKAFS share, the driver
-ensures the Regular mount user exists and returns its password as the
-rule's **access_key** (Manila's `access_key` column, String(255)).
+When a WEKAFS share is created, the driver ensures the Regular mount
+user exists and places its password in the share's export-location
+metadata as **`weka_mount_password`**.
 
 The tenant retrieves the credential with standard OpenStack tooling —
 no operator intervention required:
 
 ```bash
 openstack share create WEKAFS 100 --name myshare --share-type weka
-openstack share access create myshare user weka
-KEY=$(openstack share access list myshare \
-        -f value -c "Access Key" | head -1)
+KEY=$(openstack share show myshare -f json \
+        | jq -r '.export_locations[0].metadata.weka_mount_password')
 ```
 
 The `KEY` value is the mount user's password.  Use it to log in and
@@ -202,11 +201,11 @@ mount -t wekafs \
     <backend>/<fs_name> <mountpoint>
 ```
 
-The access rule is still a no-op for **enforcement** (enforcement is at
-the org boundary); its only added effect is carrying the credential.
+Access rules on WEKAFS shares are a no-op for **enforcement**
+(enforcement is at the org boundary).
 
-The export-location metadata exposes `weka_org_name` and `weka_org_user`
-(the mount user, e.g. `manila-mnt`) for reference.
+The export-location metadata also exposes `weka_org_name` and
+`weka_org_user` (the mount user, e.g. `manila-mnt`) for reference.
 
 ### Isolation config options
 
@@ -318,7 +317,7 @@ openstack share access create my-wekafs-share ip 10.0.9.0/24 --access-level ro
 ```
 
 A `user` rule (e.g. `... user weka`) does not create an IP policy; it just
-returns the self-service mount credential (`access_key`).
+returns `active` (the mount credential is in export-location metadata).
 
 ### Model B — named policy groups (reused across shares)
 
