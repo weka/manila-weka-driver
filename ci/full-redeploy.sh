@@ -138,8 +138,9 @@ WEKA_REPO="/opt/stack/manila-weka-driver"
 if [ -d "${WEKA_REPO}/ci" ]; then
     log "Refreshing CI scripts from ${WEKA_REPO}/ci"
     for f in ci-runner.sh post-results.sh collect-logs.sh \
-             gerrit-listener.py tempest-include.txt \
-             local.conf.template; do
+             gerrit-listener.py tempest-include.txt tempest-exclude.txt \
+             local.conf.template \
+             run-tempest.sh; do
         [ -f "${WEKA_REPO}/ci/${f}" ] && cp "${WEKA_REPO}/ci/${f}" "${CI_DIR}/"
     done
     chmod +x "${CI_DIR}"/*.sh "${CI_DIR}"/*.py 2>/dev/null || true
@@ -188,11 +189,14 @@ if [ -f "$TEMPEST_CONF" ]; then
     iniset "$TEMPEST_CONF" share multitenancy_enabled false
     iniset "$TEMPEST_CONF" share create_networks_when_multitenancy_enabled false
     iniset "$TEMPEST_CONF" share default_share_type_name weka-nfs
-    # nfs is the default protocol; WEKAFS is validated separately (upstream
-    # tempest has no wekafs test class to drive it from enable_protocols).
-    iniset "$TEMPEST_CONF" share enable_protocols nfs
-    iniset "$TEMPEST_CONF" share enable_ip_rules_for_protocols nfs
-    iniset "$TEMPEST_CONF" share enable_ro_access_level_for_protocols nfs
+    # Both protocols are tested: nfs is the pass-1 default; ci-runner's
+    # run-tempest.sh runs a second pass with wekafs as the default (and
+    # default_share_type_name=weka-wekafs), which runs the plugin's own
+    # lifecycle tests and ShareRulesTest against WEKAFS shares directly.
+    # No upstream-plugin patching is needed or done.
+    iniset "$TEMPEST_CONF" share enable_protocols nfs,wekafs
+    iniset "$TEMPEST_CONF" share enable_ip_rules_for_protocols nfs,wekafs
+    iniset "$TEMPEST_CONF" share enable_ro_access_level_for_protocols nfs,wekafs
     iniset "$TEMPEST_CONF" share run_snapshot_tests true
     iniset "$TEMPEST_CONF" share run_revert_to_snapshot_tests true
     iniset "$TEMPEST_CONF" share run_shrink_tests true
@@ -244,6 +248,11 @@ set -u
 # driver. This script runs without `set -x`; `{ set +x; }` guards against a
 # `bash -x` invocation too.
 log "Setting Weka credential in manila.conf (untraced)"
+# Stop manila-share while we (re)configure creds and discover the NFS gateway.
+# Otherwise its driver's REST-login retries compete for the Weka admin account
+# and trip the login lockout (403 "locked out for N s") that empties gateway
+# discovery. It is restarted once, cleanly, at the end of this block.
+sudo systemctl stop devstack@m-shr 2>&1 || true
 set +u
 source "${DEVSTACK_DIR}/functions"
 { set +x; } 2>/dev/null
@@ -255,14 +264,26 @@ iniset /etc/manila/manila.conf weka_wekafs weka_password "$WEKA_PASSWORD"
 # CI-local value is fine; override with $WEKA_ORG_ADMIN_SECRET if set.
 iniset /etc/manila/manila.conf weka_nfs    weka_org_admin_secret "${WEKA_ORG_ADMIN_SECRET:-ci-only-weka-org-hmac}"
 iniset /etc/manila/manila.conf weka_wekafs weka_org_admin_secret "${WEKA_ORG_ADMIN_SECRET:-ci-only-weka-org-hmac}"
+# weka_auth_token_dir: the driver makedirs this path, but its default parent
+# (/var/lib/manila) is root-owned and not writable by the `stack` user.
+# /opt/stack/data is created by DevStack with stack:stack ownership.
+iniset /etc/manila/manila.conf weka_nfs    weka_auth_token_dir /opt/stack/data/manila/weka-tokens
+iniset /etc/manila/manila.conf weka_wekafs weka_auth_token_dir /opt/stack/data/manila/weka-tokens
 set -u
 
 # ── Point manila at the live Weka NFS gateway ─────────────────────────────────
 # The CI host is a Weka client, so discover the UP nfs-gateway container's IP.
 # ganesha listens on 0.0.0.0:2049 there; mountable once its host firewall is
-# open (opened by the gateway bootstrap). Set weka_nfs_server in both backends
-# so create_share_from_snapshot can reach the gateway, then restart manila-share.
-GW_IP=$(weka cluster container -J 2>/dev/null | python3 -c '
+# open (opened by the gateway bootstrap). Set weka_nfs_server in BOTH
+# [weka_nfs] AND [weka_wekafs] sections: a cross-backend operation such as
+# create_share_from_snapshot scheduled onto the wekafs backend needs the NFS
+# copy path too, and hits weka_nfs_server=None without this.
+#
+# Lockout-safe: `weka` CLI login triggers a lockout (403 "locked out for N s")
+# when the cluster has recently rate-limited auth.  Retry a few times with a
+# short sleep before giving up; never hard-fail the redeploy on discovery error.
+_discover_gw_ip() {
+    python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -271,16 +292,63 @@ except Exception:
 print(next((c["ips"][0] for c in d
             if "nfs-gateway" in (c.get("hostname") or "")
             and c.get("status") == "UP" and c.get("ips")), ""))
-' 2>/dev/null || true)
+'
+}
+
+# Establish a FRESH Weka CLI session before discovery. Without this the
+# discovery query below relies on a persisted login that is often stale/expired
+# at (unattended) redeploy time, returns nothing, and leaves weka_nfs_server
+# unset -> create_share_from_snapshot fails. Lockout-safe; never hard-fails.
+# Discovery is best-effort: never let a login/query non-zero exit (or the
+# `[ n -lt 5 ]` test evaluating false on the last attempt) abort the whole
+# redeploy under `set -e`. Restore `set -e` after the block.
+set +e
+for _attempt in 1 2 3 4 5; do
+    _login=$(weka user login admin "${WEKA_PASSWORD:-}" \
+        -H "${WEKA_API_SERVER:-}" -P "${WEKA_API_PORT:-14000}" 2>&1)
+    if echo "$_login" | grep -qi "locked out"; then
+        # The lockout is ~2 minutes ("locked out for 2 minutes"); sleep past
+        # it with a fixed wait (do NOT parse "2" as seconds — that's too short).
+        log "Weka login locked out; waiting 130s (login ${_attempt}/5)"
+        sleep 130
+        continue
+    fi
+    weka status >/dev/null 2>&1 && break
+    [ "$_attempt" -lt 5 ] && sleep 5
+done
+unset _attempt _login
+
+GW_IP=""
+for _attempt in 1 2 3 4 5; do
+    _raw=$(weka cluster container -J 2>&1)
+    if echo "$_raw" | grep -qi "locked out"; then
+        log "Weka login locked out; waiting 130s before retry ${_attempt}/5"
+        sleep 130
+        continue
+    fi
+    GW_IP=$(echo "$_raw" | _discover_gw_ip 2>/dev/null)
+    [ -n "$GW_IP" ] && break
+    [ "$_attempt" -lt 5 ] && sleep 5
+done
+unset _attempt _raw
+set -e
+
 if [ -n "$GW_IP" ]; then
-    log "Weka NFS gateway discovered at $GW_IP; setting weka_nfs_server"
+    if [ "$GW_IP" = "${WEKA_API_SERVER:-}" ]; then
+        log "WARNING: discovered weka_nfs_server=${GW_IP} equals the Weka API" \
+            "host — this is likely the management IP, not an NFS gateway;" \
+            "create_share_from_snapshot may fail"
+    else
+        log "Weka NFS gateway discovered at ${GW_IP}; setting weka_nfs_server on both backends"
+    fi
     set +u
     source "${DEVSTACK_DIR}/functions"
-    iniset /etc/manila/manila.conf weka_nfs weka_nfs_server "$GW_IP"
+    iniset /etc/manila/manila.conf weka_nfs    weka_nfs_server "$GW_IP"
     iniset /etc/manila/manila.conf weka_wekafs weka_nfs_server "$GW_IP"
     set -u
 else
-    log "WARNING: no UP Weka NFS gateway found; weka_nfs_server left as-is (create_share_from_snapshot will fail)"
+    log "WARNING: no UP Weka NFS gateway found after 3 attempts;" \
+        "weka_nfs_server left unconfigured (create_share_from_snapshot will fail)"
 fi
 
 # Restart manila-share unconditionally so the post-stack weka_password (and

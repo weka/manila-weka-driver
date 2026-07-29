@@ -71,9 +71,10 @@ weka_organization = ${WEKA_ORGANIZATION}
 weka_filesystem_group = default
 weka_share_name_prefix = ci_nfs_
 weka_mount_point_base = /mnt/weka/nfs
-# NFS server the driver mounts from to copy snapshot data
-# (create_share_from_snapshot). Same host as the API in this CI.
-weka_nfs_server = ${WEKA_API_SERVER}
+# weka_nfs_server (the NFS gateway the driver mounts from for
+# create_share_from_snapshot) is deliberately NOT hardcoded here: the Weka API
+# host is not the NFS gateway. full-redeploy.sh discovers the live UP gateway
+# post-stack and sets weka_nfs_server on both backends.
 # WEKAFS per-tenant isolation is always on, so weka_org_admin_secret is
 # mandatory for the driver to start (even on this NFS backend). Like
 # weka_password it is a secret, so it is applied post-stack (untraced)
