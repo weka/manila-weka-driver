@@ -725,7 +725,13 @@ class WekaShareDriver(driver.ShareDriver):
         num_cores = (
             self.configuration.safe_get('weka_num_cores') or 1)
         net = self.configuration.safe_get('weka_net_device')
-        backends = self._get_backends()
+        # The Manila host is a joined (stateful) Weka client, so snapshot
+        # copy mounts must use bare fs_name (backends=None) to reuse the
+        # existing cluster attachment.  Passing backends=<addr>/<fs> would
+        # trigger a second cluster attachment and fail with exit 3 ("Another
+        # client container is already attached to the target cluster").
+        # Do NOT change this to _get_backends() — that was the regression
+        # introduced in fc3cdad and is fixed here by keeping backends=None.
         # Both filesystems are in the project's org; one token covers
         # both mounts (WEKAFS is always isolated, so a token is always
         # produced).
@@ -735,7 +741,7 @@ class WekaShareDriver(driver.ShareDriver):
         dst_mnt = tempfile.mkdtemp(prefix='manila_weka_snap_dst_')
         try:
             with weka_posix.WekaMount(
-                backends=backends,
+                backends=None,
                 fs_name=src_fs_name,
                 mount_point=src_mnt,
                 auth_token_path=auth_token_path,
@@ -743,7 +749,7 @@ class WekaShareDriver(driver.ShareDriver):
                 net=net,
             ):
                 with weka_posix.WekaMount(
-                    backends=backends,
+                    backends=None,
                     fs_name=new_fs_name,
                     mount_point=dst_mnt,
                     auth_token_path=auth_token_path,
@@ -1218,10 +1224,10 @@ class WekaShareDriver(driver.ShareDriver):
             denied the mount.
 
         As a self-service convenience the driver also ensures a
-        least-privilege (Regular) mount user exists in the project's org
-        and returns that user's password as each rule's ``access_key`` so
-        tenants can mint their own mount token; the org's TenantAdmin
-        credential is never exposed.
+        least-privilege (Regular) mount user exists in the project's org.
+        The mount user's password is placed in the share's export-location
+        metadata as ``weka_mount_password`` so tenants can mint their own
+        mount token; the org's TenantAdmin credential is never exposed.
 
         ``user``/``cert`` rules do not map to an IP policy, so they only
         grant the org-boundary mount credential (active, no per-share IP
@@ -1231,14 +1237,16 @@ class WekaShareDriver(driver.ShareDriver):
         """
         project_id = share.get('project_id')
         org_client = self._org_client(project_id)
-        access_key = self._org_mount_password(project_id)
+        mount_password = self._org_mount_password(project_id)
 
         # Ensure the self-service mount user exists (idempotent) whenever
-        # there is access to grant.
+        # there is access to grant.  The password is surfaced to tenants via
+        # the share's export-location metadata (weka_mount_password), not as
+        # an access rule's access_key.
         if add_rules:
             try:
                 org_client.create_user(
-                    self._org_mount_user(), 'Regular', access_key)
+                    self._org_mount_user(), 'Regular', mount_password)
             except weka_exc.WekaApiError as exc:
                 # Idempotent: the mount user may already exist from an
                 # earlier access rule on another share in this project.
@@ -1256,8 +1264,7 @@ class WekaShareDriver(driver.ShareDriver):
                     "per-rule entry %s (type=%s) accepted as active.",
                     share['id'], rule['access_id'], rule['access_type'],
                 )
-                rule_state_map[rule['access_id']] = {
-                    'state': 'active', 'access_key': access_key}
+                rule_state_map[rule['access_id']] = {'state': 'active'}
             return rule_state_map
 
         # Model A: per-share rw/ro policies driven by the access rules.
@@ -1283,8 +1290,7 @@ class WekaShareDriver(driver.ShareDriver):
                     "mount credential; no per-share IP policy created.",
                     rule['access_id'], rule['access_type'],
                 )
-                rule_state_map[rule['access_id']] = {
-                    'state': 'active', 'access_key': access_key}
+                rule_state_map[rule['access_id']] = {'state': 'active'}
                 continue
             if _is_ipv6(rule['access_to']):
                 LOG.warning(
@@ -1295,8 +1301,7 @@ class WekaShareDriver(driver.ShareDriver):
                 continue
             try:
                 self._apply_wekafs_rule(org_client, share, fs_uid, rule)
-                rule_state_map[rule['access_id']] = {
-                    'state': 'active', 'access_key': access_key}
+                rule_state_map[rule['access_id']] = {'state': 'active'}
             except Exception as exc:
                 LOG.error(
                     "Failed to apply WEKAFS rule %s on share %s: %s",
@@ -1339,8 +1344,12 @@ class WekaShareDriver(driver.ShareDriver):
         """Remove an ip rule's IP from both per-share policies.
 
         Non-ip rules never created a policy, so there is nothing to undo.
+        IPv6 addresses are also a no-op: they were never applied (rejected
+        at add-time), so there is no Weka policy entry to remove.
         """
         if rule.get('access_type') != 'ip':
+            return
+        if _is_ipv6(rule['access_to']):
             return
         weka_ip = _policy_ip(rule['access_to'])
         for level in ('rw', 'ro'):
@@ -2186,14 +2195,15 @@ class WekaShareDriver(driver.ShareDriver):
             'weka_fs_name': fs_name,
         }
         # WEKAFS shares are always isolated, so expose the Weka
-        # organization name and the least-privilege mount username tenants
-        # log in as. The mount password is delivered separately via
-        # update_access (access_key), so no secret appears in metadata.
+        # organization name, the least-privilege mount username, and the
+        # mount password in metadata for tenant self-service.
         if share_proto == _WEKAFS_PROTO:
             project_id = share.get('project_id')
             if project_id:
                 metadata['weka_org_name'] = self._org_name(project_id)
                 metadata['weka_org_user'] = self._org_mount_user()
+                metadata['weka_mount_password'] = (
+                    self._org_mount_password(project_id))
         return [{
             'path': path,
             'is_admin_only': False,

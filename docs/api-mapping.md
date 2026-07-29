@@ -56,7 +56,7 @@ Manila driver operation.
 | `update_access` (NFS del) | `/nfsPermissions/{uid}` | DELETE | Remove permission |
 | `update_access` (NFS del) | `/clientGroups` | GET | Find client group by name |
 | `update_access` (NFS del) | `/clientGroups/{uid}` | DELETE | Remove per-rule client group |
-| `update_access` (WEKAFS) | `/users` | POST | Ensure Regular mount user exists (idempotent); its password is returned as each rule's `access_key` |
+| `update_access` (WEKAFS) | `/users` | POST | Ensure Regular mount user exists (idempotent); its password is in export-location metadata as `weka_mount_password` |
 | `update_access` (WEKAFS ip add) | `/security/policies` | GET | Find the per-share rw/ro policy by name (`manila-<share8>-<rw\|ro>`) |
 | `update_access` (WEKAFS ip add) | `/security/policies` | POST | Create the per-share `Allow` policy (first ip at that level; `read_only` for ro) |
 | `update_access` (WEKAFS ip add) | `/security/policies/{uid}` | PATCH | `add_ip` the client IP to an existing policy |
@@ -64,7 +64,7 @@ Manila driver operation.
 | `update_access` (WEKAFS ip del) | `/security/policies/{uid}` | PATCH | `remove_ip` the client IP from the policy |
 | `update_access` (WEKAFS ip del) | `/fileSystems/{uid}/securityPolicy/detach` | POST | Detach when the policy becomes empty |
 | `update_access` (WEKAFS ip del) | `/security/policies/{uid}` | DELETE | Delete the now-empty per-share policy |
-| `update_access` (WEKAFS user/cert) | *(credential only)* | — | No IP policy; rule returned `active` with the mount `access_key`. Enforcement is the org boundary (`auth_required=True`) plus any attached ip policies. See [known-issues.md §6](known-issues.md#6-wekafs-access-control-scope-and-limits) |
+| `update_access` (WEKAFS user/cert) | *(credential only)* | — | No IP policy; rule returned `active`. Mount credential is in export-location metadata (`weka_mount_password`). Enforcement is the org boundary (`auth_required=True`) plus any attached ip policies. See [known-issues.md §6](known-issues.md#6-wekafs-access-control-scope-and-limits) |
 | `create_share` (WEKAFS, Model B) | `/security/policies` + `/fileSystems/{uid}/securityPolicy/attach` | GET/POST | For a share type with `weka:security_policy_group`, ensure and attach the shared group policies (`manila-grp-<group>-<rw\|ro>`) |
 
 ## Driver Setup
@@ -80,7 +80,7 @@ Manila driver operation.
 | WEKAFS share ops (isolation) | `/login` | POST | Log in as the per-org TenantAdmin for an org-scoped session |
 | WEKAFS `create_share` (isolation) | `/organizations` | GET | Check if the project's org exists |
 | WEKAFS `create_share` (isolation) | `/organizations` | POST | Create the org **and its TenantAdmin in one call** if absent |
-| WEKAFS `update_access` (isolation) | `/users` | POST | Lazily ensure the Regular mount user (`<weka_org_user>-mnt`); its password is returned as the rule's `access_key` |
+| WEKAFS `update_access` (isolation) | `/users` | POST | Lazily ensure the Regular mount user (`<weka_org_user>-mnt`); its password is in export-location metadata as `weka_mount_password` |
 
 ## Statistics
 
@@ -115,7 +115,7 @@ Manila host                    Weka Cluster
     │  [refresh_token valid 1 year] │
 ```
 
-### WekaFS mount token (tenant, self-service via access_key)
+### WekaFS mount token (tenant, self-service via export metadata)
 
 There is **no** `/fileSystems/{uid}/mountTokens` REST endpoint.  Mount
 tokens are obtained by calling `POST /login` with the Regular mount
@@ -123,22 +123,22 @@ user's credentials (scoped to the project org), which returns a
 `refresh_token` written to a JSON file by `weka user login`.  The
 `auth_token_path` WekaFS mount option points to that file.
 
-The mount user's password is delivered self-service: the driver returns
-it as the `access_key` of the Manila access rule when a tenant calls
-`share access create` on a WEKAFS share.  Manila's `access_key` column
-is String(255); the short HMAC-derived password fits — a raw Weka JWT
-would not.
+The mount user's password is delivered self-service: the driver places
+it in the share's export-location metadata as `weka_mount_password`
+when the share is created.  The short HMAC-derived password fits in
+this metadata value; a raw Weka JWT would not.
 
 ```
 Tenant client                  Weka Cluster
     │                               │
     │  (retrieves password from     │
-    │   openstack share access      │
-    │   list → Access Key)          │
+    │   openstack share show        │
+    │   → export metadata           │
+    │     weka_mount_password)      │
     │                               │
     │── POST /login ───────────────►│
     │   {username: manila-mnt,      │
-    │    password: <access_key>,    │
+    │    password: <weka_mount_password>,│
     │    org: <weka_org_name>}      │
     │◄── {access_token,             │
     │     refresh_token} ──────────►│

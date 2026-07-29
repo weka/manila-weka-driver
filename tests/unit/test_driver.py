@@ -413,24 +413,32 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
 
     @mock.patch(_PATCH_RSYNC)
     def test_happy_path_wekafs_copy(self, mock_rsync):
-        """_copy_snapshot_wekafs: rsync called with WekaMount mounts."""
+        """_copy_snapshot_wekafs: rsync called; both mounts use bare fs name.
+
+        The Manila host is a joined Weka client.  Passing backends would
+        trigger a second cluster attachment and fail (regression fc3cdad).
+        Both WekaMount calls must receive backends=None.
+        """
         drv = self._make_driver()
         snap = fakes.fake_snapshot()
 
         with mock.patch(
                 'manila.share.drivers.weka.driver.tempfile.mkdtemp',
                 side_effect=['/tmp/weka_src', '/tmp/weka_dst']):
-            with mock.patch.object(
-                    weka_posix.WekaMount, 'mount'):
-                with mock.patch.object(
-                        weka_posix.WekaMount, 'unmount'):
-                    drv._copy_snapshot_wekafs(
-                        self._new_share(),
-                        fakes.fake_snapshot_model(),
-                        snap,
-                        fakes.FAKE_FS_NAME,
-                        fakes.FAKE_NEW_FS_NAME)
+            with mock.patch(
+                    'manila.share.drivers.weka.driver.weka_posix.'
+                    'WekaMount') as mock_mount:
+                drv._copy_snapshot_wekafs(
+                    self._new_share(),
+                    fakes.fake_snapshot_model(),
+                    snap,
+                    fakes.FAKE_FS_NAME,
+                    fakes.FAKE_NEW_FS_NAME)
 
+        self.assertEqual(2, mock_mount.call_count)
+        for call in mock_mount.call_args_list:
+            self.assertIsNone(call.kwargs.get('backends'),
+                              "backends must be None for bare-fs mount")
         mock_rsync.assert_called_once()
 
     # ── Isolation-enabled create-from-snapshot ────────────────────────────
@@ -484,6 +492,8 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
         for call in mock_mount.call_args_list:
             self.assertEqual(
                 '/tmp/tok.json', call.kwargs.get('auth_token_path'))
+            self.assertIsNone(call.kwargs.get('backends'),
+                              "backends must be None for bare-fs mount")
         mock_rsync.assert_called_once()
 
     @mock.patch(_PATCH_SLEEP)
@@ -960,10 +970,8 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
         )
         entry = result[rule['access_id']]
         self.assertEqual('active', entry['state'])
-        # Tenants still receive the self-service mount credential.
-        self.assertEqual(
-            drv._org_mount_password(share['project_id']),
-            entry['access_key'])
+        # Mount credential is now in export-location metadata, not here.
+        self.assertNotIn('access_key', entry)
         # A per-share rw Allow policy was created and attached.
         args, kwargs = drv._client.create_security_policy.call_args
         self.assertEqual('manila-share-uu-rw', args[0])
@@ -1009,9 +1017,8 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
         )
         entry = result[rule['access_id']]
         self.assertEqual('active', entry['state'])
-        self.assertEqual(
-            drv._org_mount_password(share['project_id']),
-            entry['access_key'])
+        # Mount credential is now in export-location metadata, not here.
+        self.assertNotIn('access_key', entry)
         # No IP policy for a non-ip rule.
         drv._client.create_security_policy.assert_not_called()
 
@@ -1029,6 +1036,22 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
             update_rules=[])
         self.assertEqual('error', result[rule['access_id']]['state'])
         drv._client.create_security_policy.assert_not_called()
+
+    def test_update_access_wekafs_delete_ipv6_rule_is_noop(self):
+        """Deleting an errored IPv6 rule on a WEKAFS share is a no-op."""
+        drv = self._make_driver()
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        share = fakes.fake_share(proto='WEKAFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='2001:db8::1')
+        # Must not raise; IPv6 was never applied so no policy to remove.
+        result = drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[], delete_rules=[rule],
+            update_rules=[])
+        self.assertEqual({}, result)
+        drv._client.get_security_policy_by_name.assert_not_called()
 
     def test_update_access_nfs_ipv6_rule_raises_invalid_access(self):
         """IPv6 ip rules on NFS shares raise InvalidShareAccess."""
@@ -1665,6 +1688,17 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
         self.assertIn('weka-test.example.com', result[0]['path'])
         self.assertNotIn('nfs-lb.example.com', result[0]['path'])
 
+    def test_build_export_locations_wekafs_includes_mount_password(self):
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='WEKAFS')
+        result = drv._build_export_locations(
+            share, fakes.FAKE_FS_NAME, fakes.FAKE_FS_UID, 'WEKAFS')
+        meta = result[0]['metadata']
+        self.assertIn('weka_mount_password', meta)
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            meta['weka_mount_password'])
+
     # ------------------------------------------------------------------
     # _get_fs_uid_for_share
     # ------------------------------------------------------------------
@@ -1900,6 +1934,9 @@ class TestWekaShareDriverWekafsIsolation(unittest.TestCase):
         self.assertEqual('manila-projuuid5678', meta['weka_org_name'])
         # Tenants log in as the least-privilege mount user, not the admin.
         self.assertEqual('manila-mnt', meta['weka_org_user'])
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            meta['weka_mount_password'])
 
     def test_create_share_reuses_existing_org(self):
         drv = self._make_driver()
@@ -1960,10 +1997,8 @@ class TestWekaShareDriverWekafsIsolation(unittest.TestCase):
 
         entry = result[rule['access_id']]
         self.assertEqual('active', entry['state'])
-        # Tenants receive the least-privilege mount password as access_key.
-        self.assertEqual(
-            drv._org_mount_password(share['project_id']),
-            entry['access_key'])
+        # Mount credential is now in export-location metadata, not here.
+        self.assertNotIn('access_key', entry)
         # A Regular (mount-only) user was ensured in the org.
         args, _ = org_client.create_user.call_args
         self.assertEqual('Regular', args[1])
@@ -1990,9 +2025,8 @@ class TestWekaShareDriverWekafsIsolation(unittest.TestCase):
 
         entry = result[rule['access_id']]
         self.assertEqual('active', entry['state'])
-        self.assertEqual(
-            drv._org_mount_password(share['project_id']),
-            entry['access_key'])
+        # Mount credential is in export-location metadata, not access_key.
+        self.assertNotIn('access_key', entry)
 
     def test_mount_password_differs_from_admin_password(self):
         drv = self._make_driver()
@@ -3501,6 +3535,23 @@ class TestWekaShareDriverSecurityPolicies(unittest.TestCase):
             None, fakes.fake_share(proto='WEKAFS'), [], [], [rule])
         org.get_security_policy_by_name.assert_not_called()
 
+    def test_delete_ipv6_ip_rule_is_noop(self):
+        """Removing an IPv6 ip rule makes no Weka policy calls.
+
+        IPv6 rules are rejected at add-time, so no policy was ever
+        created for them.  The delete path must silently no-op.
+        """
+        drv = self._make_driver()
+        org = self._org_client(drv)
+        org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='2001:db8::1')
+        # Must not raise.
+        drv.update_access(
+            None, fakes.fake_share(proto='WEKAFS'), [], [], [rule])
+        org.get_security_policy_by_name.assert_not_called()
+        org.delete_security_policy.assert_not_called()
+
     # -- Model B: named policy groups ------------------------------------
 
     def test_update_access_group_share_is_noop_active(self):
@@ -3513,9 +3564,8 @@ class TestWekaShareDriverSecurityPolicies(unittest.TestCase):
             result = drv.update_access(None, share, [], [rule], [], [])
         entry = result[rule['access_id']]
         self.assertEqual('active', entry['state'])
-        self.assertEqual(
-            drv._org_mount_password(share['project_id']),
-            entry['access_key'])
+        # Mount credential is in export-location metadata, not access_key.
+        self.assertNotIn('access_key', entry)
         org.create_security_policy.assert_not_called()
         org.get_filesystem_by_name.assert_not_called()
 

@@ -221,9 +221,9 @@ weka_max_api_retries   = 3
 
 | Access Type | WEKAFS | NFS |
 |-------------|:------:|:---:|
-| `ip` | Accepted (`active`); always returns mount credential in `access_key` | ✓ Full enforcement |
-| `user` | Accepted (`active`); always returns mount credential in `access_key` | ✗ |
-| `cert` | Accepted (`active`); always returns mount credential in `access_key` | ✗ |
+| `ip` | Accepted (`active`); mount credential in export-location metadata (`weka_mount_password`) | ✓ Full enforcement |
+| `user` | Accepted (`active`); mount credential in export-location metadata (`weka_mount_password`) | ✗ |
+| `cert` | Accepted (`active`); mount credential in export-location metadata (`weka_mount_password`) | ✗ |
 
 > **WEKAFS access rules:** WEKAFS access is enforced at the **Weka
 > organization boundary**, not per Manila access rule. Every project's
@@ -231,9 +231,10 @@ weka_max_api_retries   = 3
 > project's own Weka organization; only a client holding a token scoped
 > to that organization can mount them — enforced by the cluster.
 > A Manila access rule on a WEKAFS share is therefore a no-op for
-> *enforcement*, but it always returns the least-privilege mount user's
-> password as its `access_key`, so tenants can self-serve their own
-> mount token without operator intervention.
+> *enforcement*. The least-privilege mount user's password is placed in
+> the share's export-location metadata as `weka_mount_password` at
+> share-creation time, so tenants can self-serve their own mount token
+> without operator intervention.
 > See [Per-tenant isolation](#per-tenant-wekafs-isolation).
 
 ## Per-tenant WEKAFS isolation
@@ -255,13 +256,13 @@ The driver records `weka_org_name` and the derived mount username in each
 WEKAFS share's export-location metadata (metadata key `weka_org_user`,
 value `<weka_org_user>-mnt`, e.g. `manila-mnt`).
 
-Mounting is **self-service** — no operator hand-off. The tenant grants
-access, reads the mount user's password back as the rule's `access_key`,
-mints its own token, and mounts:
+Mounting is **self-service** — no operator hand-off. The tenant reads
+the mount user's password from export-location metadata, mints its own
+token, and mounts:
 
 ```bash
-openstack share access create myshare user weka        # any 'user' rule
-KEY=$(openstack share access list myshare -f value -c "Access Key" | head -1)
+KEY=$(openstack share show myshare -f json \
+      | jq -r '.export_locations[0].metadata.weka_mount_password')
 ORG=$(openstack share show myshare -f json \
       | jq -r '.export_locations[0].metadata.weka_org_name')
 
@@ -270,8 +271,9 @@ mount -t wekafs -o auth_token_path=~/.weka/auth-token.json \
   <backend>/<fs_name> /mnt/point
 ```
 
-The returned credential is a `Regular` (mount-only) user scoped to the
-tenant's own org — it cannot administer the org or reach other tenants.
+The `weka_mount_password` value is a `Regular` (mount-only) user's
+credential scoped to the tenant's own org — it cannot administer the
+org or reach other tenants.
 Organizations (and their users) are **retained** when a project's last
 share is deleted. NFS shares are unaffected.
 

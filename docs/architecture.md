@@ -213,7 +213,7 @@ session.
 
 | Protocol | Isolation mechanism | Manila access rules |
 |----------|--------------------|--------------------|
-| WEKAFS   | Weka org + `auth_required=True` on FS | Accepted; returns mount credential via `access_key` |
+| WEKAFS   | Weka org + `auth_required=True` on FS | Accepted; mount credential in export-location metadata (`weka_mount_password`) |
 | NFS      | IP-based client groups + NFS perms | Enforced |
 
 **Org lifecycle:**
@@ -222,20 +222,18 @@ is deleted.  They are never torn down automatically.
 
 **Self-service credential delivery:**
 When a tenant creates a Manila access rule on a WEKAFS share,
-`_update_wekafs_access` ensures the Regular mount user exists and
-returns its password as the rule's **access_key** (Manila's
-`access_key` column is String(255); the short HMAC-derived password
-fits — a raw Weka JWT would not).  Tenants retrieve it with:
+`_update_wekafs_access` ensures the Regular mount user exists.
+The mount user's password is placed in the share's export-location
+metadata as **`weka_mount_password`**.  Tenants retrieve it with:
 
 ```
-openstack share access list <share> -c "Access Key"
-openstack share access show <id> -c access_key
+openstack share show <share> -f json \
+  | jq -r '.export_locations[0].metadata.weka_mount_password'
 ```
 
-The access rule has no enforcement effect; its only function is to
-carry the credential.  Export-location metadata exposes
-`weka_org_name` and `weka_org_user` (the mount user, e.g.
-`manila-mnt`) for reference.
+The access rule has no enforcement effect.  Export-location metadata
+also exposes `weka_org_name` and `weka_org_user` (the mount user,
+e.g. `manila-mnt`) for reference.
 
 The driver writes its own internal mount tokens (mode 0600) to
 `weka_auth_token_dir` (default `/var/lib/manila/weka-tokens`) for
