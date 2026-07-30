@@ -71,5 +71,14 @@ def umount(mount_path, lazy=False):
 
 @manila.privsep.sys_admin_pctxt.entrypoint
 def rsync(src, dst):
-    """Rsync src/ into dst/ with archive mode."""
-    processutils.execute('rsync', '-a', src, dst)
+    """Rsync src/ into dst/ preserving file attributes.
+
+    Archive mode (-a) with --omit-dir-times. The destination is the root
+    of a freshly-created Weka filesystem exported over NFS, and setting
+    mtime on the NFS export root ('.') fails with EPERM ("rsync: failed to
+    set times on '<dst>/.': Permission denied (13)") even for the mounting
+    client — which aborts the whole copy with exit code 23. Omitting
+    directory times avoids that while still preserving file contents,
+    permissions, ownership and per-file timestamps for a faithful clone.
+    """
+    processutils.execute('rsync', '-a', '--omit-dir-times', src, dst)
