@@ -84,7 +84,14 @@ continuing with current revision"
         cp "$_NEW_SCRIPT" "$_SELF" \
             || { log "WARNING: could not copy updated script; continuing"; }
         if [ -x "$_SELF" ]; then
-            exec env WEKA_REDEPLOY_REEXEC=1 bash "$_SELF" "$@"
+            # Close the lock fd (9>&-) across the re-exec. Otherwise the
+            # re-exec'd copy's `exec > >(tee ...)` at the top spawns a tee
+            # that inherits fd 9 (this held lock), and its own `exec 9>` +
+            # `flock` then deadlock for 1800s waiting on the lock that tee
+            # keeps alive -> "a previous run may be stuck". Releasing it here
+            # lets the re-exec'd copy re-acquire the lock cleanly. Same
+            # inherited-lock-fd guard already used for unstack/stack.sh below.
+            exec env WEKA_REDEPLOY_REEXEC=1 bash "$_SELF" "$@" 9>&-
         fi
     fi
     unset _NEW_SCRIPT _SELF
