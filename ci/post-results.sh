@@ -51,6 +51,16 @@ if [ -f "${LOG_DIR}/testr_results.html" ]; then
 - Test results: ${LOG_URL}testr_results.html"
 fi
 
+# Add per-pass tempest logs if available (two-pass run: NFS + WEKAFS defaults)
+if [ -f "${LOG_DIR}/tempest-nfs.log" ]; then
+    COMMENT="${COMMENT}
+- NFS pass log: ${LOG_URL}tempest-nfs.log"
+fi
+if [ -f "${LOG_DIR}/tempest-wekafs.log" ]; then
+    COMMENT="${COMMENT}
+- WEKAFS pass log: ${LOG_URL}tempest-wekafs.log"
+fi
+
 # ── Post to Gerrit ────────────────────────────────────────────────────────────
 
 REVIEW_ARGS=()
