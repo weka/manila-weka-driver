@@ -970,8 +970,9 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
         )
         entry = result[rule['access_id']]
         self.assertEqual('active', entry['state'])
-        # Mount credential is now in export-location metadata, not here.
-        self.assertNotIn('access_key', entry)
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            entry['access_key'])
         # A per-share rw Allow policy was created and attached.
         args, kwargs = drv._client.create_security_policy.call_args
         self.assertEqual('manila-share-uu-rw', args[0])
@@ -1017,8 +1018,9 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
         )
         entry = result[rule['access_id']]
         self.assertEqual('active', entry['state'])
-        # Mount credential is now in export-location metadata, not here.
-        self.assertNotIn('access_key', entry)
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            entry['access_key'])
         # No IP policy for a non-ip rule.
         drv._client.create_security_policy.assert_not_called()
 
@@ -1688,17 +1690,6 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
         self.assertIn('weka-test.example.com', result[0]['path'])
         self.assertNotIn('nfs-lb.example.com', result[0]['path'])
 
-    def test_build_export_locations_wekafs_includes_mount_password(self):
-        drv = self._make_driver()
-        share = fakes.fake_share(proto='WEKAFS')
-        result = drv._build_export_locations(
-            share, fakes.FAKE_FS_NAME, fakes.FAKE_FS_UID, 'WEKAFS')
-        meta = result[0]['metadata']
-        self.assertIn('weka_mount_password', meta)
-        self.assertEqual(
-            drv._org_mount_password(share['project_id']),
-            meta['weka_mount_password'])
-
     # ------------------------------------------------------------------
     # _get_fs_uid_for_share
     # ------------------------------------------------------------------
@@ -1934,9 +1925,7 @@ class TestWekaShareDriverWekafsIsolation(unittest.TestCase):
         self.assertEqual('manila-projuuid5678', meta['weka_org_name'])
         # Tenants log in as the least-privilege mount user, not the admin.
         self.assertEqual('manila-mnt', meta['weka_org_user'])
-        self.assertEqual(
-            drv._org_mount_password(share['project_id']),
-            meta['weka_mount_password'])
+        self.assertNotIn('weka_mount_password', meta)
 
     def test_create_share_reuses_existing_org(self):
         drv = self._make_driver()
@@ -1997,8 +1986,9 @@ class TestWekaShareDriverWekafsIsolation(unittest.TestCase):
 
         entry = result[rule['access_id']]
         self.assertEqual('active', entry['state'])
-        # Mount credential is now in export-location metadata, not here.
-        self.assertNotIn('access_key', entry)
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            entry['access_key'])
         # A Regular (mount-only) user was ensured in the org.
         args, _ = org_client.create_user.call_args
         self.assertEqual('Regular', args[1])
@@ -2025,8 +2015,9 @@ class TestWekaShareDriverWekafsIsolation(unittest.TestCase):
 
         entry = result[rule['access_id']]
         self.assertEqual('active', entry['state'])
-        # Mount credential is in export-location metadata, not access_key.
-        self.assertNotIn('access_key', entry)
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            entry['access_key'])
 
     def test_mount_password_differs_from_admin_password(self):
         drv = self._make_driver()
@@ -3564,8 +3555,9 @@ class TestWekaShareDriverSecurityPolicies(unittest.TestCase):
             result = drv.update_access(None, share, [], [rule], [], [])
         entry = result[rule['access_id']]
         self.assertEqual('active', entry['state'])
-        # Mount credential is in export-location metadata, not access_key.
-        self.assertNotIn('access_key', entry)
+        self.assertEqual(
+            drv._org_mount_password(share['project_id']),
+            entry['access_key'])
         org.create_security_policy.assert_not_called()
         org.get_filesystem_by_name.assert_not_called()
 
