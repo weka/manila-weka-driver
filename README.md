@@ -221,9 +221,9 @@ weka_max_api_retries   = 3
 
 | Access Type | WEKAFS | NFS |
 |-------------|:------:|:---:|
-| `ip` | Accepted (`active`); mount credential in export-location metadata (`weka_mount_password`) | ✓ Full enforcement |
-| `user` | Accepted (`active`); mount credential in export-location metadata (`weka_mount_password`) | ✗ |
-| `cert` | Accepted (`active`); mount credential in export-location metadata (`weka_mount_password`) | ✗ |
+| `ip` | Accepted (`active`); mount credential in rule `access_key` | ✓ Full enforcement |
+| `user` | Accepted (`active`); mount credential in rule `access_key` | ✗ |
+| `cert` | Accepted (`active`); mount credential in rule `access_key` | ✗ |
 
 > **WEKAFS access rules:** WEKAFS access is enforced at the **Weka
 > organization boundary**, not per Manila access rule. Every project's
@@ -231,10 +231,9 @@ weka_max_api_retries   = 3
 > project's own Weka organization; only a client holding a token scoped
 > to that organization can mount them — enforced by the cluster.
 > A Manila access rule on a WEKAFS share is therefore a no-op for
-> *enforcement*. The least-privilege mount user's password is placed in
-> the share's export-location metadata as `weka_mount_password` at
-> share-creation time, so tenants can self-serve their own mount token
-> without operator intervention.
+> *enforcement*. The least-privilege mount user's password is returned
+> in the access rule's `access_key` so tenants can self-serve their
+> own mount token without operator intervention.
 > See [Per-tenant isolation](#per-tenant-wekafs-isolation).
 
 ## Per-tenant WEKAFS isolation
@@ -257,12 +256,12 @@ WEKAFS share's export-location metadata (metadata key `weka_org_user`,
 value `<weka_org_user>-mnt`, e.g. `manila-mnt`).
 
 Mounting is **self-service** — no operator hand-off. The tenant reads
-the mount user's password from export-location metadata, mints its own
-token, and mounts:
+the mount user's password from the access rule's `access_key`, mints
+its own token, and mounts:
 
 ```bash
-KEY=$(openstack share show myshare -f json \
-      | jq -r '.export_locations[0].metadata.weka_mount_password')
+KEY=$(openstack access-rule show <access-rule-id> -f json \
+      | jq -r '.access_key')
 ORG=$(openstack share show myshare -f json \
       | jq -r '.export_locations[0].metadata.weka_org_name')
 
@@ -271,9 +270,9 @@ mount -t wekafs -o auth_token_path=~/.weka/auth-token.json \
   <backend>/<fs_name> /mnt/point
 ```
 
-The `weka_mount_password` value is a `Regular` (mount-only) user's
-credential scoped to the tenant's own org — it cannot administer the
-org or reach other tenants.
+The `access_key` value is a `Regular` (mount-only) user's credential
+scoped to the tenant's own org — it cannot administer the org or reach
+other tenants.
 Organizations (and their users) are **retained** when a project's last
 share is deleted. NFS shares are unaffected.
 

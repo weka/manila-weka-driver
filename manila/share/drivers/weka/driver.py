@@ -1225,9 +1225,9 @@ class WekaShareDriver(driver.ShareDriver):
 
         As a self-service convenience the driver also ensures a
         least-privilege (Regular) mount user exists in the project's org.
-        The mount user's password is placed in the share's export-location
-        metadata as ``weka_mount_password`` so tenants can mint their own
-        mount token; the org's TenantAdmin credential is never exposed.
+        The mount user's password is returned as each access rule's
+        ``access_key`` so tenants can mint their own mount token;
+        the org's TenantAdmin credential is never exposed.
 
         ``user``/``cert`` rules do not map to an IP policy, so they only
         grant the org-boundary mount credential (active, no per-share IP
@@ -1240,9 +1240,8 @@ class WekaShareDriver(driver.ShareDriver):
         mount_password = self._org_mount_password(project_id)
 
         # Ensure the self-service mount user exists (idempotent) whenever
-        # there is access to grant.  The password is surfaced to tenants via
-        # the share's export-location metadata (weka_mount_password), not as
-        # an access rule's access_key.
+        # there is access to grant.  The password is returned as each
+        # rule's access_key so tenants can mint their own mount token.
         if add_rules:
             try:
                 org_client.create_user(
@@ -1264,7 +1263,8 @@ class WekaShareDriver(driver.ShareDriver):
                     "per-rule entry %s (type=%s) accepted as active.",
                     share['id'], rule['access_id'], rule['access_type'],
                 )
-                rule_state_map[rule['access_id']] = {'state': 'active'}
+                rule_state_map[rule['access_id']] = {
+                    'state': 'active', 'access_key': mount_password}
             return rule_state_map
 
         # Model A: per-share rw/ro policies driven by the access rules.
@@ -1290,7 +1290,8 @@ class WekaShareDriver(driver.ShareDriver):
                     "mount credential; no per-share IP policy created.",
                     rule['access_id'], rule['access_type'],
                 )
-                rule_state_map[rule['access_id']] = {'state': 'active'}
+                rule_state_map[rule['access_id']] = {
+                    'state': 'active', 'access_key': mount_password}
                 continue
             if _is_ipv6(rule['access_to']):
                 LOG.warning(
@@ -1301,7 +1302,8 @@ class WekaShareDriver(driver.ShareDriver):
                 continue
             try:
                 self._apply_wekafs_rule(org_client, share, fs_uid, rule)
-                rule_state_map[rule['access_id']] = {'state': 'active'}
+                rule_state_map[rule['access_id']] = {
+                    'state': 'active', 'access_key': mount_password}
             except Exception as exc:
                 LOG.error(
                     "Failed to apply WEKAFS rule %s on share %s: %s",
@@ -2195,15 +2197,13 @@ class WekaShareDriver(driver.ShareDriver):
             'weka_fs_name': fs_name,
         }
         # WEKAFS shares are always isolated, so expose the Weka
-        # organization name, the least-privilege mount username, and the
-        # mount password in metadata for tenant self-service.
+        # organization name and the least-privilege mount username in
+        # metadata for tenant self-service.
         if share_proto == _WEKAFS_PROTO:
             project_id = share.get('project_id')
             if project_id:
                 metadata['weka_org_name'] = self._org_name(project_id)
                 metadata['weka_org_user'] = self._org_mount_user()
-                metadata['weka_mount_password'] = (
-                    self._org_mount_password(project_id))
         return [{
             'path': path,
             'is_admin_only': False,
