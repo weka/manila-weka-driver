@@ -205,6 +205,28 @@ if [ -d "${WEKA_REPO}/ci" ]; then
     chmod +x "${CI_DIR}"/*.sh "${CI_DIR}"/*.py 2>/dev/null || true
 fi
 
+# ── Pin manila-tempest-plugin to the WEKAFS access_key change ──────────────────
+# TEMPORARY: until change 999687 merges, master asserts access_key is None for
+# WEKAFS ip rules and fails now that the driver returns the mount credential in
+# access_key. Check that change out over the master clone stack.sh pulled and
+# reinstall it editable so tempest discovers the patched tests.
+# https://review.opendev.org/c/openstack/manila-tempest-plugin/+/999687
+# Remove this block (revert to plain master) once 999687 merges.
+TEMPEST_PLUGIN_DIR="/opt/stack/manila-tempest-plugin"
+TEMPEST_PLUGIN_REF="refs/changes/87/999687/1"
+if [ -d "${TEMPEST_PLUGIN_DIR}/.git" ]; then
+    log "Pinning manila-tempest-plugin to ${TEMPEST_PLUGIN_REF}"
+    if git -C "${TEMPEST_PLUGIN_DIR}" fetch \
+            https://review.opendev.org/openstack/manila-tempest-plugin \
+            "${TEMPEST_PLUGIN_REF}" 2>&1 \
+       && git -C "${TEMPEST_PLUGIN_DIR}" checkout FETCH_HEAD 2>&1; then
+        /opt/stack/data/venv/bin/pip install -e "${TEMPEST_PLUGIN_DIR}" -q \
+            2>&1 || log "WARNING: failed to reinstall manila-tempest-plugin"
+    else
+        log "WARNING: could not check out ${TEMPEST_PLUGIN_REF}; using master"
+    fi
+fi
+
 # ── Create share types ────────────────────────────────────────────────────────
 
 log "Creating share types"
