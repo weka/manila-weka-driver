@@ -1029,6 +1029,12 @@ class WekaShareDriver(driver.ShareDriver):
         Supports full-sync (all rules in access_rules, empty
         add/delete/update) and incremental (add/delete/update) modes.
 
+        In full-sync mode the backend must end up matching
+        ``access_rules`` exactly, so the rules are applied *and* any
+        backend resource left over from a rule Manila no longer has is
+        pruned.  Without that sweep, access revoked while the share
+        manager was down would stay live on the cluster.
+
         For WEKAFS protocol: access is controlled via Weka filesystem
         authentication and mount tokens; rules are accepted as a no-op.
         For NFS protocol: rules translate to Weka NFS client groups and
@@ -1042,7 +1048,8 @@ class WekaShareDriver(driver.ShareDriver):
 
         # Full-sync mode: Manila passes the full rule set in access_rules
         # with empty add/delete/update lists.
-        if not add_rules and not delete_rules and not update_rules:
+        full_sync = not (add_rules or delete_rules or update_rules)
+        if full_sync:
             add_rules = list(access_rules or [])
 
         # Access-level updates re-apply through the same idempotent path
@@ -1050,13 +1057,14 @@ class WekaShareDriver(driver.ShareDriver):
         apply_rules = add_rules + update_rules
 
         if share_proto == _NFS_PROTO:
-            return self._update_nfs_access(share, apply_rules, delete_rules)
+            return self._update_nfs_access(
+                share, apply_rules, delete_rules, full_sync)
         elif share_proto == _WEKAFS_PROTO:
             return self._update_wekafs_access(
-                share, apply_rules, delete_rules)
+                share, apply_rules, delete_rules, full_sync)
         return {}
 
-    def _update_nfs_access(self, share, add_rules, delete_rules):
+    def _update_nfs_access(self, share, add_rules, delete_rules, full_sync):
         """Add / delete NFS permissions on the Weka cluster."""
         rule_state_map = {}
         fs_name = self._share_name(share['id'])
@@ -1102,7 +1110,55 @@ class WekaShareDriver(driver.ShareDriver):
                     rule['access_id'], exc,
                 )
 
+        if full_sync:
+            self._prune_nfs_rules(share, fs_name, add_rules)
+
         return rule_state_map
+
+    def _prune_nfs_rules(self, share, fs_name, expected_rules):
+        """Drop backend NFS resources Manila no longer has a rule for.
+
+        Full-sync only.  Manila's ``update_access`` contract requires the
+        backend to match ``access_rules`` exactly when add/delete are
+        empty, so every export permission on this filesystem whose
+        per-rule client group is not in *expected_rules* is removed --
+        along with the now-unused client group.  Driven off the
+        filesystem's own permissions, so it can never touch another
+        share's resources.
+        """
+        prefix = self._nfs_cg_name(share['id'])
+        expected = {
+            self._nfs_cg_name(share['id'], rule['access_id'])
+            for rule in expected_rules or []
+        }
+        stale = set()
+        for perm in self._client.list_nfs_permissions() or []:
+            perm_fs, perm_cg = self._perm_keys(perm)
+            if perm_fs != fs_name:
+                continue
+            if not perm_cg.startswith(prefix) or perm_cg in expected:
+                continue
+            try:
+                self._client.delete_nfs_permission(perm['uid'])
+                stale.add(perm_cg)
+            except Exception as exc:
+                LOG.warning(
+                    "Failed to prune stale NFS permission for group %s "
+                    "on share %s: %s", perm_cg, share['id'], exc,
+                )
+        for cg_name in stale:
+            try:
+                self._delete_client_group_by_name(cg_name)
+            except Exception as exc:
+                LOG.warning(
+                    "Failed to prune stale NFS client group %s on "
+                    "share %s: %s", cg_name, share['id'], exc,
+                )
+        if stale:
+            LOG.info(
+                "Pruned %d stale NFS access resource(s) on share %s "
+                "during full sync.", len(stale), share['id'],
+            )
 
     def _apply_nfs_rule(self, share, fs_name, rule):
         """Idempotently apply a single NFS 'ip' access rule.
@@ -1117,8 +1173,7 @@ class WekaShareDriver(driver.ShareDriver):
         nfs_type = (
             'RW' if rule['access_level'] == constants.ACCESS_LEVEL_RW
             else 'RO')
-        cg_name = 'manila-{}-{}'.format(
-            share['id'][:8], rule['access_id'][:8])
+        cg_name = self._nfs_cg_name(share['id'], rule['access_id'])
         try:
             weka_ip = _cidr_to_weka_ip(rule['access_to'])
         except ValueError:
@@ -1181,11 +1236,7 @@ class WekaShareDriver(driver.ShareDriver):
     def _find_nfs_permission(self, fs_name, cg_name):
         """Return the NFS permission for (filesystem, group), or None."""
         for perm in self._client.list_nfs_permissions() or []:
-            perm_fs = perm.get(
-                'filesystem', perm.get('filesystem_id', ''))
-            perm_cg = perm.get(
-                'group', perm.get('client_group_name', ''))
-            if perm_fs == fs_name and perm_cg == cg_name:
+            if self._perm_keys(perm) == (fs_name, cg_name):
                 return perm
         return None
 
@@ -1199,7 +1250,8 @@ class WekaShareDriver(driver.ShareDriver):
         except weka_exc.WekaNotFound:
             pass
 
-    def _update_wekafs_access(self, share, add_rules, delete_rules):
+    def _update_wekafs_access(self, share, add_rules, delete_rules,
+                              full_sync):
         """Apply WekaFS access rules using per-filesystem security policies.
 
         Every WEKAFS filesystem lives in its project's own Weka
@@ -1270,11 +1322,13 @@ class WekaShareDriver(driver.ShareDriver):
         # Model A: per-share rw/ro policies driven by the access rules.
         # Only resolve the filesystem UID when there is actual ip work
         # (attach/detach); user/cert rules never touch a policy.
+        # A full sync also needs it: pruning a stale IP can empty a
+        # policy, which is then detached from the filesystem.
         ip_work = any(
             r.get('access_type') == 'ip'
             for r in list(add_rules or []) + list(delete_rules or []))
         fs_uid = None
-        if ip_work:
+        if ip_work or full_sync:
             fs = org_client.get_filesystem_by_name(
                 self._share_name(share['id']))
             fs_uid = fs['uid'] if fs else None
@@ -1320,7 +1374,55 @@ class WekaShareDriver(driver.ShareDriver):
                     rule['access_id'], share['id'], exc,
                 )
 
+        if full_sync:
+            self._prune_wekafs_rules(org_client, share, fs_uid, add_rules)
+
         return rule_state_map
+
+    def _prune_wekafs_rules(self, org_client, share, fs_uid, expected_rules):
+        """Drop policy IPs Manila no longer has an ip rule for.
+
+        Full-sync only (Model A).  Manila's ``update_access`` contract
+        requires the backend to match ``access_rules`` exactly when
+        add/delete are empty, so any IP left in a per-share rw/ro policy
+        that is not backed by a current rule is removed -- otherwise a
+        client whose access was revoked while the share manager was down
+        could still mount.  Reuses :meth:`_policy_set_ip`, which detaches
+        and deletes a policy once its last IP is gone.
+        """
+        expected = {'rw': set(), 'ro': set()}
+        for rule in expected_rules or []:
+            if rule.get('access_type') != 'ip':
+                continue
+            if _is_ipv6(rule['access_to']):
+                continue
+            expected[self._rule_level(rule)].add(
+                _policy_ip(rule['access_to']))
+
+        pruned = 0
+        for level in ('rw', 'ro'):
+            pol = org_client.get_security_policy_by_name(
+                self._wekafs_policy_name(share['id'], level))
+            if pol is None:
+                continue
+            for weka_ip in list(pol.get('ip') or []):
+                if weka_ip in expected[level]:
+                    continue
+                try:
+                    self._policy_set_ip(
+                        org_client, share, fs_uid, level, weka_ip,
+                        present=False)
+                    pruned += 1
+                except Exception as exc:
+                    LOG.warning(
+                        "Failed to prune stale WEKAFS policy IP %s (%s) "
+                        "on share %s: %s", weka_ip, level, share['id'], exc,
+                    )
+        if pruned:
+            LOG.info(
+                "Pruned %d stale WEKAFS policy IP(s) on share %s during "
+                "full sync.", pruned, share['id'],
+            )
 
     def _apply_wekafs_rule(self, org_client, share, fs_uid, rule):
         """Add one ip rule to the matching per-share rw/ro policy.
@@ -1330,8 +1432,7 @@ class WekaShareDriver(driver.ShareDriver):
         ro<->rw change on the same IP does not leave a stale entry.
         """
         weka_ip = _policy_ip(rule['access_to'])
-        level = ('rw' if rule['access_level'] == constants.ACCESS_LEVEL_RW
-                 else 'ro')
+        level = self._rule_level(rule)
         other = 'ro' if level == 'rw' else 'rw'
         self._policy_set_ip(
             org_client, share, fs_uid, level, weka_ip, present=True)
@@ -1430,13 +1531,10 @@ class WekaShareDriver(driver.ShareDriver):
         """
         cg_names = set()
         for perm in self._client.list_nfs_permissions() or []:
-            perm_fs = perm.get(
-                'filesystem', perm.get('filesystem_id', ''))
+            # The client group name encodes the rule ID.
+            perm_fs, cg_name = self._perm_keys(perm)
             if perm_fs != fs_name:
                 continue
-            # Match by client group name which encodes the rule ID.
-            cg_name = perm.get(
-                'group', perm.get('client_group_name', ''))
             if rule['access_id'][:8] in cg_name:
                 self._client.delete_nfs_permission(perm['uid'])
                 if cg_name:
@@ -1455,12 +1553,9 @@ class WekaShareDriver(driver.ShareDriver):
         """
         cg_names = set()
         for perm in self._client.list_nfs_permissions() or []:
-            perm_fs = perm.get(
-                'filesystem', perm.get('filesystem_id', ''))
+            perm_fs, cg_name = self._perm_keys(perm)
             if perm_fs != fs_name:
                 continue
-            cg_name = perm.get(
-                'group', perm.get('client_group_name', ''))
             try:
                 self._client.delete_nfs_permission(perm['uid'])
             except weka_exc.WekaNotFound:
@@ -1811,6 +1906,34 @@ class WekaShareDriver(driver.ShareDriver):
     def _wekafs_policy_name(share_id, level):
         """Per-share Model A policy name for an access level (rw/ro)."""
         return 'manila-{}-{}'.format(share_id[:8], level)
+
+    @staticmethod
+    def _nfs_cg_name(share_id, access_id=None):
+        """Name of the per-rule NFS client group for a share.
+
+        With no *access_id* this returns the share's group-name prefix,
+        which identifies every client group the driver owns for it.
+        """
+        return 'manila-{}-{}'.format(
+            share_id[:8], access_id[:8] if access_id else '')
+
+    @staticmethod
+    def _perm_keys(perm):
+        """Return (filesystem, client group) for an NFS permission dict.
+
+        Weka v5 reports these as ``filesystem``/``group``; older payloads
+        use ``filesystem_id``/``client_group_name``.
+        """
+        return (
+            perm.get('filesystem', perm.get('filesystem_id', '')),
+            perm.get('group', perm.get('client_group_name', '')),
+        )
+
+    @staticmethod
+    def _rule_level(rule):
+        """Map an access rule's level to a policy suffix (rw/ro)."""
+        return ('rw' if rule['access_level'] == constants.ACCESS_LEVEL_RW
+                else 'ro')
 
     @staticmethod
     def _group_policy_name(group, level):

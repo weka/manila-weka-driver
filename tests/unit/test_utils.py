@@ -125,28 +125,5 @@ class TestRetryOnTransient(unittest.TestCase):
         self.assertEqual('my_func', decorated.__name__)
 
 
-class TestBuildExportLocation(unittest.TestCase):
-
-    def test_basic_path(self):
-        loc = utils.build_export_location('10.0.0.1', 'my_fs')
-        self.assertEqual('10.0.0.1/my_fs', loc['path'])
-        self.assertFalse(loc['is_admin_only'])
-        self.assertEqual({}, loc['metadata'])
-
-    def test_admin_only(self):
-        loc = utils.build_export_location(
-            '10.0.0.1', 'my_fs', is_admin_only=True)
-        self.assertTrue(loc['is_admin_only'])
-
-    def test_metadata_included(self):
-        meta = {'weka_fs_uid': 'uid-123'}
-        loc = utils.build_export_location('10.0.0.1', 'my_fs', metadata=meta)
-        self.assertEqual('uid-123', loc['metadata']['weka_fs_uid'])
-
-    def test_multi_backend_path(self):
-        loc = utils.build_export_location('10.0.0.1,10.0.0.2', 'my_fs')
-        self.assertEqual('10.0.0.1,10.0.0.2/my_fs', loc['path'])
-
-
 if __name__ == '__main__':
     unittest.main()

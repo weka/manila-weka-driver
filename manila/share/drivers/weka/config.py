@@ -199,16 +199,6 @@ weka_opts = [
             'stack is used (UDP mode).'
         ),
     ),
-    cfg.IntOpt(
-        'weka_posix_mount_timeout',
-        default=60,
-        min=10,
-        max=600,
-        help=(
-            'Timeout in seconds to wait for a WekaFS POSIX mount to '
-            'complete. Default is 60 seconds.'
-        ),
-    ),
 
     # --- API behaviour ---
     cfg.IntOpt(

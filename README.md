@@ -191,7 +191,6 @@ weka_max_api_retries   = 3
 | `weka_mount_point_base` | `String` | `/mnt/weka` | Base directory for WekaFS mounts |
 | `weka_num_cores` | `Int` (1–19) | `1` | CPU cores for the WekaFS POSIX client |
 | `weka_net_device` | `String` | `None` | NIC for DPDK mode (e.g. `eth0`) |
-| `weka_posix_mount_timeout` | `Int` | `60` | Seconds to wait for a POSIX mount |
 | `weka_api_timeout` | `Int` | `30` | HTTP timeout for API requests (seconds) |
 | `weka_max_api_retries` | `Int` | `3` | Maximum retries on transient API errors |
 | `weka_share_name_prefix` | `String` | `manila_` | Prefix for Weka filesystem names |

@@ -78,9 +78,6 @@ weka_num_cores = 1
 # NIC for DPDK mode (e.g. "eth0", "ens3f0").
 # Omit to use kernel networking (UDP mode).
 # weka_net_device = eth0
-
-# Timeout to wait for a POSIX mount to complete (seconds).
-weka_posix_mount_timeout = 60
 ```
 
 ### API Behaviour

@@ -90,24 +90,3 @@ def sanitize_log_params(params, secret_keys=('password', 'token', 'secret')):
         else:
             sanitized[key] = value
     return sanitized
-
-
-def build_export_location(backends, fs_name, is_admin_only=False,
-                          preferred=True, metadata=None):
-    """Build a Manila export location dict for a WekaFS share.
-
-    :param backends: Comma-separated list of Weka backend host addresses.
-    :param fs_name: Weka filesystem name.
-    :param is_admin_only: Whether this location is only for admin access.
-    :param preferred: Whether this is the preferred export location.
-    :param metadata: Optional dict of extra metadata.
-    :returns: Export location dict compatible with Manila's expected format.
-    """
-    path = '{backends}/{fs_name}'.format(
-        backends=backends, fs_name=fs_name)
-    loc = {
-        'path': path,
-        'is_admin_only': is_admin_only,
-        'metadata': metadata or {},
-    }
-    return loc
