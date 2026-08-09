@@ -1405,7 +1405,7 @@ class WekaShareDriver(driver.ShareDriver):
                 self._wekafs_policy_name(share['id'], level))
             if pol is None:
                 continue
-            for weka_ip in list(pol.get('ip') or []):
+            for weka_ip in self._policy_ips(pol):
                 if weka_ip in expected[level]:
                     continue
                 try:
@@ -1477,10 +1477,10 @@ class WekaShareDriver(driver.ShareDriver):
                 pol = org_client.create_security_policy(
                     name, ips=[weka_ip], action='Allow',
                     read_only=read_only)
-            elif weka_ip not in (pol.get('ip') or []):
+            elif weka_ip not in self._policy_ips(pol):
                 try:
                     org_client.update_security_policy(
-                        self._policy_uid(pol), name, add_ips=[weka_ip])
+                        self._policy_uid(pol), add_ips=[weka_ip])
                 except weka_exc.WekaApiError as exc:
                     if not _is_already_exists_error(exc):
                         raise
@@ -1499,11 +1499,11 @@ class WekaShareDriver(driver.ShareDriver):
         # present is False -> remove the IP.
         if pol is None:
             return
-        current = list(pol.get('ip') or [])
+        current = self._policy_ips(pol)
         if weka_ip in current:
             try:
                 org_client.update_security_policy(
-                    self._policy_uid(pol), name, remove_ips=[weka_ip])
+                    self._policy_uid(pol), remove_ips=[weka_ip])
             except weka_exc.WekaNotFound:
                 pass
             current = [i for i in current if i != weka_ip]
@@ -1934,6 +1934,20 @@ class WekaShareDriver(driver.ShareDriver):
         """Map an access rule's level to a policy suffix (rw/ro)."""
         return ('rw' if rule['access_level'] == constants.ACCESS_LEVEL_RW
                 else 'ro')
+
+    @staticmethod
+    def _policy_ips(policy):
+        """Addresses currently matched by a security policy.
+
+        The API is asymmetric here: writes take ``ip`` (create) and
+        ``add_ip``/``remove_ip`` (update), but a policy read back from
+        ``GET /security/policies`` reports its addresses under ``ips``.
+        Reading ``ip`` yields None, which silently means "no addresses"
+        -- so a caller reconciling against it would prune nothing and a
+        caller removing an address would treat the policy as already
+        empty. Prefer ``ips`` and fall back to ``ip``.
+        """
+        return list(policy.get('ips') or policy.get('ip') or [])
 
     @staticmethod
     def _group_policy_name(group, level):

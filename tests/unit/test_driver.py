@@ -1167,8 +1167,7 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
 
         # 10.0.0.1 is still granted; only the orphaned 10.0.0.9 is removed.
         drv._client.update_security_policy.assert_called_once_with(
-            fakes.FAKE_POLICY_UID, 'manila-share-uu-rw',
-            remove_ips=['10.0.0.9'])
+            fakes.FAKE_POLICY_UID, remove_ips=['10.0.0.9'])
         drv._client.delete_security_policy.assert_not_called()
 
     def test_update_access_wekafs_full_sync_no_rules_deletes_policy(self):
@@ -1192,8 +1191,7 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
         )
 
         drv._client.update_security_policy.assert_called_once_with(
-            fakes.FAKE_POLICY_UID, 'manila-share-uu-ro',
-            remove_ips=['10.0.0.7'])
+            fakes.FAKE_POLICY_UID, remove_ips=['10.0.0.7'])
         drv._client.detach_fs_security_policies.assert_called_once_with(
             fakes.FAKE_FS_UID, [fakes.FAKE_POLICY_UID])
         drv._client.delete_security_policy.assert_called_once_with(
@@ -1214,6 +1212,70 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
 
         drv._client.update_security_policy.assert_not_called()
         drv._client.delete_security_policy.assert_not_called()
+
+    def test_update_access_wekafs_prune_reads_ips_key(self):
+        """Policy addresses are read from 'ips', the key the API returns.
+
+        Regression: the driver read 'ip', which is only a *write* key.
+        On a live cluster that yields None, so prune iterated nothing and
+        the WEKAFS half of full-sync reconciliation silently did nothing.
+        """
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='WEKAFS')
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        # Raw API shape: addresses under 'ips', with no 'ip' key at all.
+        pol = {
+            'uid': fakes.FAKE_POLICY_UID,
+            'name': 'manila-share-uu-rw',
+            'action': 'Allow',
+            'read_only': False,
+            'ips': ['10.0.0.1', '10.0.0.9'],
+        }
+        policies = {'manila-share-uu-rw': pol, 'manila-share-uu-ro': None}
+        drv._client.get_security_policy_by_name.side_effect = (
+            lambda name: policies.get(name))
+        drv._client.attach_fs_security_policies.return_value = {}
+
+        rule = fakes.fake_access_rule(access_type='ip', access_to='10.0.0.1')
+        drv.update_access(
+            context=None, share=share,
+            access_rules=[rule], add_rules=[], delete_rules=[],
+            update_rules=[])
+
+        drv._client.update_security_policy.assert_called_once_with(
+            fakes.FAKE_POLICY_UID, remove_ips=['10.0.0.9'])
+
+    def test_update_access_wekafs_prune_keeps_policy_with_other_ips(self):
+        """Removing one address of several must not delete the policy."""
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='WEKAFS')
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        policies = {
+            'manila-share-uu-rw': fakes.fake_security_policy(
+                name='manila-share-uu-rw',
+                ips=['10.0.0.1', '10.0.0.2', '10.0.0.9']),
+            'manila-share-uu-ro': None,
+        }
+        drv._client.get_security_policy_by_name.side_effect = (
+            lambda name: policies.get(name))
+        drv._client.attach_fs_security_policies.return_value = {}
+
+        rules = [
+            fakes.fake_access_rule(access_type='ip', access_to='10.0.0.1'),
+            fakes.fake_access_rule(access_type='ip', access_to='10.0.0.2'),
+        ]
+        drv.update_access(
+            context=None, share=share,
+            access_rules=rules, add_rules=[], delete_rules=[],
+            update_rules=[])
+
+        drv._client.update_security_policy.assert_called_once_with(
+            fakes.FAKE_POLICY_UID, remove_ips=['10.0.0.9'])
+        # Two addresses still backed by rules -> the policy stays put.
+        drv._client.delete_security_policy.assert_not_called()
+        drv._client.detach_fs_security_policies.assert_not_called()
 
     def test_update_access_wekafs_prune_failure_is_tolerated(self):
         """A failed policy-IP removal is logged, not raised."""
