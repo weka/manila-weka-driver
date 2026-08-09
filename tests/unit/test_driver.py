@@ -48,7 +48,6 @@ def _make_config(**kwargs):
         'weka_mount_point_base': '/mnt/weka',
         'weka_num_cores': 1,
         'weka_net_device': None,
-        'weka_posix_mount_timeout': 60,
         'weka_api_timeout': 30,
         'weka_max_api_retries': 3,
         'weka_share_name_prefix': 'manila_',
@@ -932,6 +931,121 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
 
         drv._client.create_nfs_permission.assert_called_once()
 
+    def test_update_access_nfs_full_sync_prunes_stale_rules(self):
+        """Full sync removes backend resources with no matching rule."""
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='NFS')
+        fs_name = drv._share_name(share['id'])
+        kept = fakes.fake_access_rule(access_type='ip',
+                                      access_to='198.51.100.0/24')
+        kept_cg = 'manila-{}-{}'.format(
+            share['id'][:8], kept['access_id'][:8])
+
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        drv._client.list_client_groups.return_value = [
+            fakes.fake_client_group(uid='cg-stale', name='manila-share-uu-'
+                                                         'deadbeef'),
+        ]
+        drv._client.get_client_group.return_value = (
+            fakes.fake_client_group_detail())
+        drv._client.create_client_group.return_value = (
+            fakes.fake_client_group(name=kept_cg))
+        drv._client.create_nfs_permission.return_value = (
+            fakes.fake_nfs_permission())
+        drv._client.list_nfs_permissions.return_value = [
+            # Another share's filesystem — never touched.
+            fakes.fake_nfs_permission(
+                uid='perm-other-fs', fs_name='manila_other',
+                cg_name='manila-share-uu-deadbeef'),
+            # Not a manila-managed group on this filesystem — left alone.
+            fakes.fake_nfs_permission(
+                uid='perm-foreign', fs_name=fs_name, cg_name='ops-group'),
+            # Still backed by a rule in access_rules — kept.
+            fakes.fake_nfs_permission(
+                uid='perm-kept', fs_name=fs_name, cg_name=kept_cg),
+            # Stale: no rule in access_rules maps to it — pruned.
+            fakes.fake_nfs_permission(
+                uid='perm-stale', fs_name=fs_name,
+                cg_name='manila-share-uu-deadbeef'),
+        ]
+
+        drv.update_access(
+            context=None, share=share,
+            access_rules=[kept], add_rules=[], delete_rules=[],
+            update_rules=[],
+        )
+
+        drv._client.delete_nfs_permission.assert_called_once_with(
+            'perm-stale')
+        drv._client.delete_client_group.assert_called_once_with('cg-stale')
+
+    def test_update_access_nfs_full_sync_prunes_all_when_no_rules(self):
+        """An empty rule set revokes every backend resource."""
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='NFS')
+        fs_name = drv._share_name(share['id'])
+        drv._client.list_nfs_permissions.return_value = [
+            fakes.fake_nfs_permission(
+                uid='perm-stale', fs_name=fs_name,
+                cg_name='manila-share-uu-deadbeef'),
+        ]
+        drv._client.list_client_groups.return_value = [
+            fakes.fake_client_group(
+                uid='cg-stale', name='manila-share-uu-deadbeef'),
+        ]
+
+        drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[], delete_rules=[], update_rules=[],
+        )
+
+        drv._client.delete_nfs_permission.assert_called_once_with(
+            'perm-stale')
+        drv._client.delete_client_group.assert_called_once_with('cg-stale')
+
+    def test_update_access_nfs_prune_permission_failure_is_tolerated(self):
+        """A failed permission delete is logged, not raised."""
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='NFS')
+        fs_name = drv._share_name(share['id'])
+        drv._client.list_nfs_permissions.return_value = [
+            fakes.fake_nfs_permission(
+                uid='perm-stale', fs_name=fs_name,
+                cg_name='manila-share-uu-deadbeef'),
+        ]
+        drv._client.delete_nfs_permission.side_effect = (
+            weka_exc.WekaApiError('boom'))
+
+        drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[], delete_rules=[], update_rules=[],
+        )
+
+        # The client group is not reaped when its permission survived.
+        drv._client.delete_client_group.assert_not_called()
+
+    def test_update_access_nfs_prune_client_group_failure_is_tolerated(self):
+        """A failed client-group delete is logged, not raised."""
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='NFS')
+        fs_name = drv._share_name(share['id'])
+        drv._client.list_nfs_permissions.return_value = [
+            fakes.fake_nfs_permission(
+                uid='perm-stale', fs_name=fs_name,
+                cg_name='manila-share-uu-deadbeef'),
+        ]
+        drv._client.list_client_groups.side_effect = (
+            weka_exc.WekaApiError('boom'))
+
+        drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[], delete_rules=[], update_rules=[],
+        )
+
+        drv._client.delete_nfs_permission.assert_called_once_with(
+            'perm-stale')
+
     def test_update_access_nfs_invalid_type_sets_error(self):
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
@@ -1023,6 +1137,106 @@ class TestWekaShareDriverUpdateAccess(unittest.TestCase):
             entry['access_key'])
         # No IP policy for a non-ip rule.
         drv._client.create_security_policy.assert_not_called()
+
+    def test_update_access_wekafs_full_sync_prunes_stale_policy_ip(self):
+        """Full sync drops policy IPs with no matching ip rule."""
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='WEKAFS')
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        policies = {
+            'manila-share-uu-rw': fakes.fake_security_policy(
+                name='manila-share-uu-rw', ips=['10.0.0.1', '10.0.0.9']),
+            'manila-share-uu-ro': None,
+        }
+        drv._client.get_security_policy_by_name.side_effect = (
+            lambda name: policies.get(name))
+        drv._client.attach_fs_security_policies.return_value = {}
+
+        rules = [
+            fakes.fake_access_rule(access_type='ip', access_to='10.0.0.1'),
+            # Non-ip and IPv6 rules never map to a policy IP.
+            fakes.fake_access_rule(access_type='user', access_to='bob'),
+            fakes.fake_access_rule(access_type='ip', access_to='2001:db8::1'),
+        ]
+        drv.update_access(
+            context=None, share=share,
+            access_rules=rules, add_rules=[], delete_rules=[],
+            update_rules=[],
+        )
+
+        # 10.0.0.1 is still granted; only the orphaned 10.0.0.9 is removed.
+        drv._client.update_security_policy.assert_called_once_with(
+            fakes.FAKE_POLICY_UID, 'manila-share-uu-rw',
+            remove_ips=['10.0.0.9'])
+        drv._client.delete_security_policy.assert_not_called()
+
+    def test_update_access_wekafs_full_sync_no_rules_deletes_policy(self):
+        """An empty rule set empties, detaches and deletes the policy."""
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='WEKAFS')
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        policies = {
+            'manila-share-uu-rw': None,
+            'manila-share-uu-ro': fakes.fake_security_policy(
+                name='manila-share-uu-ro', ips=['10.0.0.7'],
+                read_only=True),
+        }
+        drv._client.get_security_policy_by_name.side_effect = (
+            lambda name: policies.get(name))
+
+        drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[], delete_rules=[], update_rules=[],
+        )
+
+        drv._client.update_security_policy.assert_called_once_with(
+            fakes.FAKE_POLICY_UID, 'manila-share-uu-ro',
+            remove_ips=['10.0.0.7'])
+        drv._client.detach_fs_security_policies.assert_called_once_with(
+            fakes.FAKE_FS_UID, [fakes.FAKE_POLICY_UID])
+        drv._client.delete_security_policy.assert_called_once_with(
+            fakes.FAKE_POLICY_UID)
+
+    def test_update_access_wekafs_full_sync_nothing_stale_is_noop(self):
+        """Full sync with no per-share policies touches nothing."""
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='WEKAFS')
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        drv._client.get_security_policy_by_name.return_value = None
+
+        drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[], delete_rules=[], update_rules=[],
+        )
+
+        drv._client.update_security_policy.assert_not_called()
+        drv._client.delete_security_policy.assert_not_called()
+
+    def test_update_access_wekafs_prune_failure_is_tolerated(self):
+        """A failed policy-IP removal is logged, not raised."""
+        drv = self._make_driver()
+        share = fakes.fake_share(proto='WEKAFS')
+        drv._client.get_filesystem_by_name.return_value = (
+            fakes.fake_filesystem())
+        policies = {
+            'manila-share-uu-rw': fakes.fake_security_policy(
+                name='manila-share-uu-rw', ips=['10.0.0.9']),
+            'manila-share-uu-ro': None,
+        }
+        drv._client.get_security_policy_by_name.side_effect = (
+            lambda name: policies.get(name))
+        drv._client.update_security_policy.side_effect = (
+            weka_exc.WekaApiError('boom'))
+
+        drv.update_access(
+            context=None, share=share,
+            access_rules=[], add_rules=[], delete_rules=[], update_rules=[],
+        )
+
+        drv._client.delete_security_policy.assert_not_called()
 
     def test_update_access_wekafs_ipv6_ip_rule_errors(self):
         """An IPv6 ip rule on a WEKAFS share is rejected."""
@@ -1423,7 +1637,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
             access_type='ip', access_to='10.1.1.1')
-        result = drv._update_nfs_access(share, [rule], [])
+        result = drv._update_nfs_access(share, [rule], [], False)
 
         self.assertEqual('active', result[rule['access_id']]['state'])
         drv._client.create_client_group.assert_called_once()
@@ -1446,7 +1660,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
                 uid=cg['uid'], name=cg_name, rules=[]))
         drv._client.list_nfs_permissions.return_value = []
 
-        result = drv._update_nfs_access(share, [rule], [])
+        result = drv._update_nfs_access(share, [rule], [], False)
 
         drv._client.create_client_group.assert_not_called()
         drv._client.add_client_group_rule.assert_called_once()
@@ -1472,7 +1686,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
                 rules=[{'ip': weka_ip}]))
         drv._client.list_nfs_permissions.return_value = []
 
-        drv._update_nfs_access(share, [rule], [])
+        drv._update_nfs_access(share, [rule], [], False)
 
         drv._client.add_client_group_rule.assert_not_called()
 
@@ -1501,7 +1715,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
                 rules=[{'ip': weka_ip}]))
         drv._client.list_nfs_permissions.return_value = [perm]
 
-        drv._update_nfs_access(share, [rule], [])
+        drv._update_nfs_access(share, [rule], [], False)
 
         drv._client.delete_nfs_permission.assert_called_once_with(
             fakes.FAKE_PERM_UID)
@@ -1606,7 +1820,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
                 reason='/nfs/clientGroups/x/rules: Rule already exists'))
 
         # Must not raise; result for this rule must be 'active'.
-        result = drv._update_nfs_access(share, [rule], [])
+        result = drv._update_nfs_access(share, [rule], [], False)
 
         self.assertEqual('active', result[rule['access_id']]['state'])
         # Permission reconcile (ro->rw) must have run despite the add error.
@@ -1636,7 +1850,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
                 status_code=400,
                 reason='bad request: invalid something'))
 
-        result = drv._update_nfs_access(share, [rule], [])
+        result = drv._update_nfs_access(share, [rule], [], False)
 
         self.assertEqual('error', result[rule['access_id']]['state'])
 
@@ -2574,7 +2788,7 @@ class TestUpdateAccessEdgeCases(unittest.TestCase):
 
         share = fakes.fake_share(proto='NFS')
         # Must not raise — exception is only a warning.
-        result = drv._update_nfs_access(share, [], [rule])
+        result = drv._update_nfs_access(share, [], [rule], False)
 
         self.assertEqual({}, result)
 
@@ -3140,7 +3354,7 @@ class TestUpdateNfsAccessDeleteRuleWarning(unittest.TestCase):
         drv._client.list_nfs_permissions.side_effect = Exception('api fail')
 
         # Must not raise.
-        result = drv._update_nfs_access(share, [], [rule])
+        result = drv._update_nfs_access(share, [], [rule], False)
         self.assertEqual({}, result)
 
 
