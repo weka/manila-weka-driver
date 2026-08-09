@@ -141,12 +141,20 @@ FAKE_POLICY_UID = 'pol-uid-eeee'
 
 def fake_security_policy(uid=FAKE_POLICY_UID, name='manila-shareuui-rw',
                          ips=None, action='Allow', read_only=False):
-    """A Weka security policy as returned by the v2 REST API."""
+    """A Weka security policy as returned by the v2 REST API.
+
+    NOTE the key is ``ips``, not ``ip``.  Writes take ``ip`` (create) and
+    ``add_ip``/``remove_ip`` (update), but a policy read back reports its
+    addresses under ``ips``.  This fixture previously used ``ip``, which
+    matched the driver's own wrong assumption -- so the suite stayed
+    green at 100% coverage while the driver read None on a live cluster
+    and never pruned or removed anything.
+    """
     return {
         'uid': uid,
         'name': name,
         'action': action,
-        'ip': list(ips or []),
+        'ips': list(ips or []),
         'read_only': read_only,
     }
 

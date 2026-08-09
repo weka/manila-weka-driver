@@ -793,17 +793,22 @@ class WekaApiClient(object):
         result = self._post('/security/policies', json=payload)
         return result.get('data', result)
 
-    def update_security_policy(self, policy_uid, name,
+    def update_security_policy(self, policy_uid,
                                add_ips=None, remove_ips=None):
         """Incrementally add/remove IP ranges on a security policy.
 
         PATCH /security/policies/{uid}
 
-        The Weka API requires 'name' on every update, so the caller must
-        pass the policy's current name.  add_ip/remove_ip amend the
-        existing IP list in place without replacing it.
+        add_ip/remove_ip amend the existing IP list in place without
+        replacing it.
+
+        Do NOT send 'name'.  The API treats a supplied name as a rename
+        request and rejects the policy's own current name with
+        "400 ... Security policy name already in use", which callers
+        that tolerate already-exists errors then swallow -- silently
+        dropping every incremental address change.
         """
-        payload = {'name': name}
+        payload = {}
         if add_ips:
             payload['add_ip'] = list(add_ips)
         if remove_ips:

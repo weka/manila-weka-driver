@@ -646,21 +646,23 @@ class TestWekaApiClientSecurityPolicies(unittest.TestCase):
         patch, cap = self._capture({'data': pol})
         with patch:
             self.client.update_security_policy(
-                fakes.FAKE_POLICY_UID, 'manila-abc-rw',
+                fakes.FAKE_POLICY_UID,
                 add_ips=['10.0.0.1'], remove_ips=['10.0.0.2'])
         self.assertEqual('PATCH', cap['method'])
         self.assertIn(fakes.FAKE_POLICY_UID, cap['url'])
-        self.assertEqual('manila-abc-rw', cap['json']['name'])
         self.assertEqual(['10.0.0.1'], cap['json']['add_ip'])
         self.assertEqual(['10.0.0.2'], cap['json']['remove_ip'])
+        # 'name' must never be sent: the API reads it as a rename and
+        # rejects the policy's own name with "already in use".
+        self.assertNotIn('name', cap['json'])
 
-    def test_update_security_policy_name_only(self):
+    def test_update_security_policy_sends_no_name(self):
+        """A no-op update sends an empty body, never a name."""
         pol = fakes.fake_security_policy()
         patch, cap = self._capture({'data': pol})
         with patch:
-            self.client.update_security_policy(
-                fakes.FAKE_POLICY_UID, 'manila-abc-rw')
-        self.assertEqual({'name': 'manila-abc-rw'}, cap['json'])
+            self.client.update_security_policy(fakes.FAKE_POLICY_UID)
+        self.assertEqual({}, cap['json'])
 
     def test_delete_security_policy(self):
         patch, cap = self._capture()
