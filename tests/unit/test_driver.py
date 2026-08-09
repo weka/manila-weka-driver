@@ -1745,12 +1745,85 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
         drv._client.get_client_group.return_value = (
             fakes.fake_client_group_detail(
                 uid=cg['uid'], name=cg_name,
-                rules=[{'ip': weka_ip}]))
+                rules=[fakes.fake_client_group_ip_rule(weka_ip)]))
         drv._client.list_nfs_permissions.return_value = []
 
         drv._update_nfs_access(share, [rule], [], False)
 
         drv._client.add_client_group_rule.assert_not_called()
+
+    def test_apply_nfs_rule_idempotent_existing_cidr(self):
+        """A CIDR rule already present is not re-added.
+
+        The cluster reports it in dotted-mask form (10.0.0.0/255.0.0.0),
+        which is what _cidr_to_weka_ip writes, so this matches directly.
+        """
+        from manila.share.drivers.weka.driver import _cidr_to_weka_ip
+        share = fakes.fake_share(proto='NFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='10.0.0.0/8')
+        cg_name = 'manila-{}-{}'.format(
+            share['id'][:8], rule['access_id'][:8])
+        cg = fakes.fake_client_group(name=cg_name)
+        weka_ip = _cidr_to_weka_ip('10.0.0.0/8')
+
+        drv = self._make_driver()
+        drv._client.list_client_groups.return_value = [cg]
+        drv._client.get_client_group.return_value = (
+            fakes.fake_client_group_detail(
+                uid=cg['uid'], name=cg_name,
+                rules=[fakes.fake_client_group_ip_rule(weka_ip)]))
+        drv._client.list_nfs_permissions.return_value = []
+
+        drv._update_nfs_access(share, [rule], [], False)
+
+        drv._client.add_client_group_rule.assert_not_called()
+
+    def test_apply_nfs_rule_ignores_non_ip_group_rules(self):
+        """A DNS rule in the group never satisfies an ip access rule."""
+        share = fakes.fake_share(proto='NFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='10.5.5.5')
+        cg_name = 'manila-{}-{}'.format(
+            share['id'][:8], rule['access_id'][:8])
+        cg = fakes.fake_client_group(name=cg_name)
+
+        drv = self._make_driver()
+        drv._client.list_client_groups.return_value = [cg]
+        drv._client.get_client_group.return_value = (
+            fakes.fake_client_group_detail(
+                uid=cg['uid'], name=cg_name,
+                rules=[{'id': 'r1', 'uid': 'u1', 'type': 'DNS',
+                        'rule': 'host.example.com'}]))
+        drv._client.list_nfs_permissions.return_value = []
+
+        drv._update_nfs_access(share, [rule], [], False)
+
+        drv._client.add_client_group_rule.assert_called_once_with(
+            fakes.FAKE_CG_UID, 'IP', '10.5.5.5')
+
+    def test_apply_nfs_rule_unparseable_group_rule_is_tolerated(self):
+        """A rule value the driver cannot parse just never matches."""
+        share = fakes.fake_share(proto='NFS')
+        rule = fakes.fake_access_rule(
+            access_type='ip', access_to='10.6.6.6')
+        cg_name = 'manila-{}-{}'.format(
+            share['id'][:8], rule['access_id'][:8])
+        cg = fakes.fake_client_group(name=cg_name)
+
+        drv = self._make_driver()
+        drv._client.list_client_groups.return_value = [cg]
+        drv._client.get_client_group.return_value = (
+            fakes.fake_client_group_detail(
+                uid=cg['uid'], name=cg_name,
+                rules=[{'id': 'r1', 'uid': 'u1', 'type': 'IP',
+                        'rule': 'not-an-address'}]))
+        drv._client.list_nfs_permissions.return_value = []
+
+        drv._update_nfs_access(share, [rule], [], False)
+
+        drv._client.add_client_group_rule.assert_called_once_with(
+            fakes.FAKE_CG_UID, 'IP', '10.6.6.6')
 
     def test_apply_nfs_rule_access_level_change(self):
         """access-level change: existing RO permission recreated as RW."""
@@ -1774,7 +1847,7 @@ class TestWekaShareDriverNFSHelpers(unittest.TestCase):
         drv._client.get_client_group.return_value = (
             fakes.fake_client_group_detail(
                 uid=cg['uid'], name=cg_name,
-                rules=[{'ip': weka_ip}]))
+                rules=[fakes.fake_client_group_ip_rule(weka_ip)]))
         drv._client.list_nfs_permissions.return_value = [perm]
 
         drv._update_nfs_access(share, [rule], [], False)

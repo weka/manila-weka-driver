@@ -159,6 +159,23 @@ def fake_security_policy(uid=FAKE_POLICY_UID, name='manila-shareuui-rw',
     }
 
 
+def fake_client_group_ip_rule(ip):
+    """One IP rule as the cluster reports it inside a client group.
+
+    NOTE the key is ``rule``, not ``ip``, and the value is always stored
+    as ``address/dotted-mask`` -- a bare address comes back as
+    ``203.0.113.253/255.255.255.255``.  Fixtures that used ``{'ip': ...}``
+    matched the driver's own wrong assumption, so its de-dup check could
+    never fire and every re-apply issued a duplicate add.
+    """
+    return {
+        'id': 'NfsClientGroupRuleId<0>',
+        'uid': 'rule-uid-0000',
+        'type': 'IP',
+        'rule': ip if '/' in ip else '{}/255.255.255.255'.format(ip),
+    }
+
+
 def fake_client_group_detail(uid=FAKE_CG_UID,
                              name='manila-abcd1234-efgh5678',
                              rules=None):
