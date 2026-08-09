@@ -129,6 +129,27 @@ def _cidr_to_weka_ip(cidr_str):
     return '{}/{}'.format(str(net.network_address), str(net.netmask))
 
 
+def _norm_weka_ip(value):
+    """Canonicalize a client-group IP rule for comparison.
+
+    Weka stores every rule as ``address/dotted-mask``, whatever form it
+    was written in: a bare ``203.0.113.253`` comes back as
+    ``203.0.113.253/255.255.255.255`` and ``10.0.0.0/8`` as
+    ``10.0.0.0/255.0.0.0``.  Comparing the raw strings therefore never
+    matches what _cidr_to_weka_ip produced for a single address, so both
+    sides are reduced to the parsed network first.
+
+    Anything unparseable is returned unchanged: it simply will not match,
+    which degrades to re-issuing an add the cluster then rejects as a
+    duplicate -- the behavior this normalization exists to avoid, but
+    still correct.
+    """
+    try:
+        return str(ipaddress.IPv4Network(value, strict=False))
+    except ValueError:
+        return value
+
+
 def _policy_ip(access_to):
     """Normalize an access_to value for a Weka security policy.
 
@@ -1192,12 +1213,15 @@ class WekaShareDriver(driver.ShareDriver):
             existing_ips = set()
         else:
             detail = self._client.get_client_group(cg['uid'])
+            # Rules report their address under 'rule' (not 'ip'), and a
+            # group can also hold DNS rules, which never match an ip
+            # access rule.
             existing_ips = {
-                r.get('ip')
+                _norm_weka_ip(r['rule'])
                 for r in detail.get('rules', [])
-                if r.get('ip')
+                if r.get('type') == 'IP' and r.get('rule')
             }
-        if weka_ip not in existing_ips:
+        if _norm_weka_ip(weka_ip) not in existing_ips:
             try:
                 self._client.add_client_group_rule(
                     cg['uid'], 'IP', weka_ip)
