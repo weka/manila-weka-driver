@@ -2903,17 +2903,24 @@ class TestUpdateAccessEdgeCases(unittest.TestCase):
         _wire_org(drv)
         return drv
 
-    def test_update_access_unknown_protocol_returns_empty(self):
-        """Line 974: unsupported protocol returns {}."""
+    def test_update_access_non_nfs_protocol_uses_wekafs_path(self):
+        """A non-NFS protocol takes the WEKAFS path.
+
+        create_share rejects anything but WEKAFS/NFS, so update_access
+        never sees a third protocol; WEKAFS is the fallback branch.
+        """
         drv = self._make_driver()
-        share = fakes.fake_share(proto='CEPHFS')
+        share = fakes.fake_share(proto='WEKAFS')
         rule = fakes.fake_access_rule()
 
-        result = drv.update_access(
-            context=None, share=share,
-            access_rules=[], add_rules=[rule], delete_rules=[],
-            update_rules=[])
+        with mock.patch.object(drv, '_update_wekafs_access') as mock_wekafs:
+            mock_wekafs.return_value = {}
+            result = drv.update_access(
+                context=None, share=share,
+                access_rules=[], add_rules=[rule], delete_rules=[],
+                update_rules=[])
 
+        mock_wekafs.assert_called_once()
         self.assertEqual({}, result)
 
     def test_update_nfs_access_delete_rule_exception_warns(self):

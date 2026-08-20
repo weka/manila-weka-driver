@@ -1089,13 +1089,13 @@ class WekaShareDriver(driver.ShareDriver):
         # as additions.
         apply_rules = add_rules + update_rules
 
+        # Only WEKAFS and NFS shares can exist on this backend: any other
+        # protocol is rejected at create_share time.
         if share_proto == _NFS_PROTO:
             return self._update_nfs_access(
                 share, apply_rules, delete_rules, full_sync)
-        elif share_proto == _WEKAFS_PROTO:
-            return self._update_wekafs_access(
-                share, apply_rules, delete_rules, full_sync)
-        return {}
+        return self._update_wekafs_access(
+            share, apply_rules, delete_rules, full_sync)
 
     def _update_nfs_access(self, share, add_rules, delete_rules, full_sync):
         """Add / delete NFS permissions on the Weka cluster."""
