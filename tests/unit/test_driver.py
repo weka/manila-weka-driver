@@ -258,7 +258,7 @@ _PATCH_MAKEDIRS = 'manila.share.drivers.weka.driver.os.makedirs'
 _PATCH_MKDTEMP = 'manila.share.drivers.weka.driver.tempfile.mkdtemp'
 _PATCH_RMDIR = 'manila.share.drivers.weka.driver.os.rmdir'
 _PATCH_SOCKET = 'manila.share.drivers.weka.driver.socket.socket'
-_PATCH_SLEEP = 'manila.share.drivers.weka.driver.time.sleep'
+_PATCH_SLEEP = 'manila.utils.time.sleep'
 _PATCH_THREAD = 'manila.share.drivers.weka.driver.threading.Thread'
 
 
@@ -575,10 +575,12 @@ class TestWekaShareDriverCreateFromSnapshot(unittest.TestCase):
         mock_socket.return_value.getsockname.return_value = (
             '192.0.2.1', 0)
         mock_mkdtemp.side_effect = ['/tmp/snap_src', '/tmp/snap_dst']
-        mock_nfs_mount.side_effect = [
-            None,
-            processutils.ProcessExecutionError('mount dst failed'),
-        ]
+        # First mount succeeds; every dst attempt (retries included)
+        # fails.
+        mock_nfs_mount.side_effect = (
+            [None]
+            + [processutils.ProcessExecutionError('mount dst failed')] * 6
+        )
         snap = fakes.fake_snapshot()
 
         self.assertRaises(

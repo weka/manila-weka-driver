@@ -81,8 +81,8 @@ import os
 import socket
 import tempfile
 import threading
-import time
 
+from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import units
@@ -98,6 +98,7 @@ from manila.share.drivers.weka import exceptions as weka_exc
 from manila.share.drivers.weka import posix as weka_posix
 from manila.share.drivers.weka import utils as weka_utils
 from manila.share import share_types
+from manila import utils as manila_utils
 
 LOG = logging.getLogger(__name__)
 
@@ -218,6 +219,18 @@ def _is_ipv6(access_to):
         return True
     except ValueError:
         return False
+
+
+@manila_utils.retry(retry_param=processutils.ProcessExecutionError,
+                    interval=1, retries=6, backoff_rate=2,
+                    backoff_sleep_max=10)
+def _nfs_mount_with_retry(export, mount_path):
+    """Mount an NFS export, retrying until the permission is live.
+
+    Weka takes a few seconds to push a freshly created export
+    permission out to its NFS servers, so the first attempts can fail.
+    """
+    weka_privsep.nfs_mount(export, mount_path)
 
 
 class WekaShareDriver(driver.ShareDriver):
@@ -674,16 +687,15 @@ class WekaShareDriver(driver.ShareDriver):
                 squash=False,
             )
 
-            # Allow the NFS server to apply the new permissions.
-            time.sleep(5)
-
-            weka_privsep.nfs_mount(
+            # The new permissions take a moment to reach the NFS
+            # servers; the mount retries instead of blocking on a sleep.
+            _nfs_mount_with_retry(
                 '{}:/{}'.format(nfs_server, src_fs_name),
                 src_mnt,
             )
             src_mounted = True
 
-            weka_privsep.nfs_mount(
+            _nfs_mount_with_retry(
                 '{}:/{}'.format(nfs_server, new_fs_name),
                 dst_mnt,
             )
