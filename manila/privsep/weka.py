@@ -42,12 +42,7 @@ def nfs_mount(export, mount_path):
 
 @manila.privsep.sys_admin_pctxt.entrypoint
 def wekafs_mount(source, mount_path, options=None):
-    """Mount a WekaFS filesystem at mount_path.
-
-    :param source: Mount source string (backends/fs_name or bare fs_name).
-    :param mount_path: Local directory to mount on.
-    :param options: Comma-separated mount options string, or None.
-    """
+    """Mount a WekaFS filesystem at mount_path."""
     cmd = ['mount', '-t', 'wekafs']
     if options:
         cmd += ['-o', options]
@@ -57,11 +52,7 @@ def wekafs_mount(source, mount_path, options=None):
 
 @manila.privsep.sys_admin_pctxt.entrypoint
 def umount(mount_path, lazy=False):
-    """Unmount the filesystem at mount_path.
-
-    :param mount_path: Directory to unmount.
-    :param lazy: If True, pass ``-l`` for a lazy unmount.
-    """
+    """Unmount the filesystem at mount_path; *lazy* passes ``-l``."""
     cmd = ['umount']
     if lazy:
         cmd.append('-l')
@@ -71,14 +62,10 @@ def umount(mount_path, lazy=False):
 
 @manila.privsep.sys_admin_pctxt.entrypoint
 def rsync(src, dst):
-    """Rsync src/ into dst/ preserving file attributes.
+    """Rsync src/ into dst/ in archive mode, minus directory times.
 
-    Archive mode (-a) with --omit-dir-times. The destination is the root
-    of a freshly-created Weka filesystem exported over NFS, and setting
-    mtime on the NFS export root ('.') fails with EPERM ("rsync: failed to
-    set times on '<dst>/.': Permission denied (13)") even for the mounting
-    client — which aborts the whole copy with exit code 23. Omitting
-    directory times avoids that while still preserving file contents,
-    permissions, ownership and per-file timestamps for a faithful clone.
+    Setting mtime on an NFS export root fails with EPERM and aborts the
+    copy (exit 23); --omit-dir-times avoids that while still preserving
+    contents, permissions, ownership and per-file timestamps.
     """
     processutils.execute('rsync', '-a', '--omit-dir-times', src, dst)

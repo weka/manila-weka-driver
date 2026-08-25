@@ -24,7 +24,6 @@ from manila.share.drivers.weka import exceptions
 
 LOG = logging.getLogger(__name__)
 
-# 1 GiB in bytes — use this constant for all GiB <-> bytes conversions.
 GiB = units.Gi
 
 
@@ -40,15 +39,9 @@ def bytes_to_gb(size_bytes):
 
 def retry_on_transient(max_retries=3, initial_delay=1.0, backoff=2.0,
                        transient_codes=(429, 500, 502, 503, 504)):
-    """Decorator: retry *func* on transient Weka API errors.
+    """Retry on transient Weka API errors with exponential back-off.
 
-    Uses exponential back-off.  Non-transient errors are re-raised
-    immediately without retrying.
-
-    :param max_retries: Maximum number of retry attempts.
-    :param initial_delay: Initial sleep time in seconds before first retry.
-    :param backoff: Multiplier applied to delay on each successive retry.
-    :param transient_codes: HTTP status codes considered transient.
+    Non-transient errors are re-raised immediately.
     """
     def decorator(func):
         @functools.wraps(func)
@@ -77,10 +70,7 @@ def retry_on_transient(max_retries=3, initial_delay=1.0, backoff=2.0,
 
 
 def sanitize_log_params(params, secret_keys=('password', 'token', 'secret')):
-    """Return a copy of *params* with secret values replaced by '***'.
-
-    Used to safely log API request parameters.
-    """
+    """Return a copy of *params* with secret values replaced by '***'."""
     if not isinstance(params, dict):
         return params
     sanitized = {}

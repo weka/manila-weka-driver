@@ -84,12 +84,10 @@ weka_opts = [
     ),
 
     # --- WEKAFS per-tenant isolation ---
-    # Isolation is mandatory and has no on/off switch: every WEKAFS share
-    # is created inside its Manila project's own Weka organization with
-    # authentication required, so a client can only mount a share if it
-    # holds a token scoped to that project's organization. NFS shares are
-    # unaffected. The options below tune how the per-project organization
-    # is named and credentialed.
+    # Mandatory, with no on/off switch: every WEKAFS share lives in its
+    # project's own Weka organization and needs an org-scoped token to
+    # mount.  These options tune how that org is named and credentialed.
+    # NFS shares are unaffected.
     cfg.StrOpt(
         'weka_org_admin_secret',
         secret=True,
@@ -141,15 +139,12 @@ weka_opts = [
     ),
 
     # --- WEKAFS per-share access (security policies) ---
-    # Named access-policy groups (Model B).  A WEKAFS share whose share
-    # type sets the "weka:security_policy_group" extra spec to <group> is
-    # created with the Allow security policies defined here attached, so
-    # only clients in the listed CIDRs may mount it (read-write for rw,
-    # read-only for ro).  The same policy object is reused across every
-    # share of the type, so a group scales to many shares within the
-    # project's per-org policy budget.  Shares without the extra spec use
-    # per-share policies driven directly by their Manila access rules
-    # (Model A) instead.
+    # Model B: a share type setting the "weka:security_policy_group"
+    # extra spec gets the group's Allow policies attached at creation, so
+    # only the listed CIDRs may mount it.  One policy object serves every
+    # share of the type, keeping a group within the org's policy budget.
+    # Without the extra spec a share uses per-share policies driven by
+    # its own access rules (Model A).
     cfg.StrOpt(
         'weka_security_policy_group',
         default=None,
