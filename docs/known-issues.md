@@ -124,11 +124,12 @@ weka nfs client-group delete <group-name>
 **Affects:** `create_share_from_snapshot` only.
 
 **Description:**
-After creating temporary NFS permissions during snapshot copy, the driver
-waits 5 seconds for the Weka NFS gateway to apply the new permissions before
-attempting to mount. On heavily loaded clusters or under high NFS gateway
-restart load, this delay may occasionally be insufficient, causing the
-subsequent NFS mount to fail.
+After creating temporary NFS permissions during snapshot copy, the Weka NFS
+gateway needs a moment to apply them. The driver retries the mount with
+exponential back-off (6 attempts, ~25 s total) instead of sleeping. On
+heavily loaded clusters or under high NFS gateway restart load, the
+permissions may still not be live within that window, causing the mount to
+fail.
 
 **Impact:**
 `create_share_from_snapshot` fails with an NFS mount error. The operation

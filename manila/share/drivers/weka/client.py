@@ -48,8 +48,7 @@ def _is_capacity_error(message):
     )
 
 
-# Fallback defaults; overridden by weka_api_timeout and
-# weka_max_api_retries config options wired in via do_setup.
+# Overridden from config (weka_api_timeout, weka_max_api_retries).
 _DEFAULT_TIMEOUT = 30
 _DEFAULT_RETRIES = 3
 
@@ -57,17 +56,8 @@ _DEFAULT_RETRIES = 3
 class WekaApiClient(object):
     """Client for the Weka REST API (v2).
 
-    Thread-safe: token refresh is protected by a lock so that concurrent
-    driver method calls do not attempt multiple simultaneous re-logins.
-
-    Usage::
-
-        client = WekaApiClient(
-            host='weka-cluster.example.com',
-            username='admin',
-            password='secret',
-        )
-        filesystems = client.list_filesystems()
+    Thread-safe: a lock around token refresh keeps concurrent callers
+    from re-logging in simultaneously.
     """
 
     def __init__(self, host, username, password,
@@ -86,8 +76,7 @@ class WekaApiClient(object):
         self._ssl_verify = ssl_verify
         self._timeout = timeout
         self._max_retries = max_retries
-        # Retained so for_org() can spawn org-scoped clients that reuse
-        # the same connection-pool sizing.
+        # Retained so for_org() can reuse the same pool sizing.
         self._pool_connections = pool_connections
         self._pool_maxsize = pool_maxsize
 
@@ -99,8 +88,6 @@ class WekaApiClient(object):
         self._token_lock = threading.Lock()
 
         self._session = requests.Session()
-        # pool_connections/pool_maxsize are passed from the driver
-        # constructor; callers set them via config options.
         adapter = req_adapters.HTTPAdapter(
             max_retries=0,  # handled manually
             pool_connections=pool_connections,
@@ -153,13 +140,7 @@ class WekaApiClient(object):
 
     def _request(self, method, path, params=None, json=None,
                  _retry_auth=True):
-        """Execute an authenticated HTTP request with retry logic.
-
-        Handles:
-          - Automatic token injection
-          - 401 → token refresh + single retry
-          - 429 / 5xx → exponential back-off up to max_retries
-        """
+        """Authenticated request: refresh on 401, back off on 429/5xx."""
         url = self._url(path)
         safe_params = utils.sanitize_log_params(params or {})
         safe_json = utils.sanitize_log_params(json or {})
@@ -202,9 +183,8 @@ class WekaApiClient(object):
                 last_exc = exc
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.Timeout) as exc:
-                # Transient network faults (e.g. a stale keep-alive
-                # connection closed server-side: "RemoteDisconnected") are
-                # retried like 5xx rather than failing the operation.
+                # Retried like a 5xx: most often a stale keep-alive
+                # connection closed server-side ("RemoteDisconnected").
                 last_exc = exc
 
             if attempt < self._max_retries:
@@ -244,25 +224,19 @@ class WekaApiClient(object):
     # ------------------------------------------------------------------
 
     def login(self):
-        """Obtain a new access/refresh token pair from the Weka cluster.
-
-        Stores the tokens internally.  Thread-safe via _token_lock.
-        """
+        """Obtain and store a new token pair (thread-safe)."""
         with self._token_lock:
             self._do_login()
 
     @staticmethod
     def _parse_lockout_seconds(body_text):
-        """Best-effort parse of a lockout duration (seconds) from a 403 body.
+        """Parse a lockout duration in seconds from a 403 body, or None.
 
-        Weka phrases the lockout several ways, e.g. "locked out for 2 minutes",
-        "locked out for 90 seconds", or the compact "locked out for another
-        1m55s". Returns the duration in seconds, or None if unparseable (the
-        caller then falls back to a safe fixed backoff). Case-insensitive.
+        Weka phrases it as "2 minutes", "90 seconds" or "1m55s".
         """
         import re
         low = (body_text or '').lower()
-        # Compact "1m55s" / "2m" / "90s" form (check first — most specific).
+        # Compact "1m55s" form first — it is the most specific.
         m = re.search(r'(\d+)\s*m\s*(\d+)\s*s', low)
         if m:
             return int(m.group(1)) * 60 + int(m.group(2))
@@ -281,12 +255,10 @@ class WekaApiClient(object):
         return None
 
     def _do_login(self):
-        """Inner login — must be called with _token_lock held.
+        """Inner login; call with _token_lock held.
 
-        On a 403 "locked out" response, backs off for the remainder of the
-        lockout window (capped at 150 s) before raising so that successive
-        login attempts from Manila's init_host retry loop are spaced out
-        past the lockout and the cluster can clear it.
+        Backs off through a "locked out" 403 (capped at 150 s) so
+        init_host's retry loop cannot perpetuate the lockout.
         """
         LOG.debug("Logging in to Weka cluster at %s as user '%s' org '%s'",
                   self._host, self._username, self._organization)
@@ -301,17 +273,14 @@ class WekaApiClient(object):
             verify=self._ssl_verify,
             timeout=self._timeout,
         )
-        # Detect login-lockout (403 with "locked out" in the body) BEFORE
-        # calling _raise_for_status so we can back off, preventing the
-        # init_host retry loop from perpetuating the lockout. Use the raw
-        # body text: Weka puts the message under varying keys (e.g. 'data'),
-        # so scanning the whole body is more robust than probing keys.
+        # Catch a lockout before _raise_for_status, so the init_host retry
+        # loop backs off instead of perpetuating it.  Weka files the
+        # message under varying keys, so scan the raw body.
         if resp.status_code == 403:
             body_text = resp.text or ''
             if 'locked out' in body_text.lower():
                 duration = self._parse_lockout_seconds(body_text)
-                # Unparseable duration -> fall back to 125s (past a typical
-                # ~2 minute lockout) so we still space attempts out.
+                # 125s clears a typical ~2 minute lockout.
                 backoff = min((duration or 125) + 5, 150)
                 LOG.warning(
                     "Weka login locked out (~%ss); backing off %ds before "
@@ -353,16 +322,10 @@ class WekaApiClient(object):
             self._do_login()
 
     def for_org(self, organization, username, password):
-        """Return a new client authenticated to a specific organization.
+        """Return a client logged in as *username* in *organization*.
 
-        Shares this client's connection settings (host, port, TLS,
-        timeouts, pool sizes) but logs in as *username* in
-        *organization*.  Used by the driver to operate inside a
-        per-tenant organization for WEKAFS isolation, because Weka binds
-        filesystem operations to the authenticated session's org rather
-        than to a request field.
-
-        :raises WekaAuthError: if the org login fails.
+        Weka binds filesystem operations to the session's org rather than
+        to a request field, so WEKAFS isolation needs a client per org.
         """
         client = WekaApiClient(
             host=self._host,
@@ -380,12 +343,7 @@ class WekaApiClient(object):
         return client
 
     def auth_token_payload(self):
-        """Return the current tokens as a Weka mount-token file payload.
-
-        The dict matches the JSON produced by ``weka user login`` and is
-        written to disk for use as a WekaFS ``auth_token_path`` mount
-        option.
-        """
+        """Current tokens shaped as a ``weka user login`` token file."""
         return {
             'access_token': self._access_token,
             'refresh_token': self._refresh_token,
@@ -393,10 +351,7 @@ class WekaApiClient(object):
         }
 
     def get_cluster_status(self):
-        """Return cluster status dict (name, version, health).
-
-        Weka 5.x: GET /cluster  (replaces the old GET /status endpoint)
-        """
+        """Return cluster name, version and health (GET /cluster)."""
         return self._get('/cluster')
 
     # ------------------------------------------------------------------
@@ -404,10 +359,7 @@ class WekaApiClient(object):
     # ------------------------------------------------------------------
 
     def list_organizations(self):
-        """Return all organizations (tenants).
-
-        GET /organizations
-        """
+        """Return all organizations (GET /organizations)."""
         result = self._get('/organizations')
         return result.get('data', result)
 
@@ -421,22 +373,12 @@ class WekaApiClient(object):
     def create_organization(self, name, username, password,
                             ssd_quota=None, total_quota=None,
                             enforce_mount_netspace_access=False):
-        """Create an organization (tenant) and its admin user.
+        """Create an org and its admin user (POST /organizations).
 
-        POST /organizations
-
-        Weka creates the organization together with its initial
-        organization-admin user in a single call; *username* and
-        *password* become that admin's credentials (used later to log
-        in to the org and manage its filesystems).
-
-        Network-space mount enforcement is disabled by default. Weka's
-        REST default enforces it, but the driver's tenants have no
-        network space attached and rely on per-filesystem auth tokens
-        for isolation — leaving it on rejects every mount into the
-        tenant ("Tenant N has no network spaces attached").
-
-        :returns: Created organization dict (includes 'uid' and 'id').
+        Network-space mount enforcement is switched off: these tenants
+        have no network space and isolate via auth tokens, and leaving
+        the REST default on rejects every mount into the org ("Tenant N
+        has no network spaces attached").
         """
         payload = {
             'name': name,
@@ -452,24 +394,15 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def delete_organization(self, org_uid):
-        """Delete an organization and all of its users.
-
-        DELETE /organizations/{uid}
-        """
+        """Delete an org and all its users (DELETE /organizations)."""
         return self._delete(
             '/organizations/{uid}'.format(uid=org_uid))
 
     def create_user(self, username, role, password):
-        """Create a user in the currently authenticated organization.
+        """Create a user in the session's org (POST /users).
 
-        POST /users
-
-        The organization is taken from this client's authenticated
-        session (Weka has no per-request org field), so call this on an
-        org-scoped client (see for_org()).
-
-        :param role: Weka role, capitalized — one of 'ClusterAdmin',
-            'TenantAdmin', 'ReadOnly', 'Regular', 'S3', 'CSI'.
+        Weka has no per-request org field, so call this on an org-scoped
+        client.  *role* is capitalized: 'TenantAdmin', 'Regular', etc.
         """
         payload = {
             'username': username,
@@ -484,26 +417,17 @@ class WekaApiClient(object):
     # ------------------------------------------------------------------
 
     def list_filesystems(self):
-        """Return a list of all filesystems on the cluster.
-
-        GET /fileSystems
-        """
+        """Return all filesystems (GET /fileSystems)."""
         result = self._get('/fileSystems')
         return result.get('data', result)
 
     def get_filesystem(self, fs_uid):
-        """Return metadata for a single filesystem.
-
-        GET /fileSystems/{uid}
-        """
+        """Return one filesystem's metadata (GET /fileSystems/{uid})."""
         result = self._get('/fileSystems/{uid}'.format(uid=fs_uid))
         return result.get('data', result)
 
     def get_filesystem_by_name(self, name):
-        """Find a filesystem by name.
-
-        Iterates list_filesystems(); returns None if not found.
-        """
+        """Find a filesystem by name, or None."""
         for fs in self.list_filesystems():
             if fs.get('name') == name:
                 return fs
@@ -516,22 +440,7 @@ class WekaApiClient(object):
                           auth_required=False,
                           allow_no_space=False,
                           data_reduction=None):
-        """Create a new Weka filesystem.
-
-        POST /fileSystems
-
-        :param name: Filesystem name (must be unique in the cluster).
-        :param group_name: Name of the filesystem group to assign to.
-        :param total_capacity: Total capacity in bytes.
-        :param ssd_capacity: SSD-tier capacity in bytes (optional).
-        :param obs_buckets: List of object store bucket UIDs (optional).
-        :param encrypted: Whether to enable filesystem encryption.
-        :param auth_required: Whether to require mount authentication.
-        :param allow_no_space: Whether to allow writes when no space left.
-        :param data_reduction: Data reduction setting (None = cluster
-            default).
-        :returns: Created filesystem dict.
-        """
+        """Create a filesystem (POST /fileSystems); capacities in bytes."""
         payload = {
             'name': name,
             'group_name': group_name,
@@ -551,10 +460,7 @@ class WekaApiClient(object):
     def update_filesystem(self, fs_uid, name=None, total_capacity=None,
                           ssd_capacity=None, auth_required=None,
                           allow_no_space=None, data_reduction=None):
-        """Update an existing filesystem's settings.
-
-        PUT /fileSystems/{uid}
-        """
+        """Update a filesystem's settings (PUT /fileSystems/{uid})."""
         payload = {}
         if name is not None:
             payload['name'] = name
@@ -571,10 +477,7 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def delete_filesystem(self, fs_uid, purge_from_obs=False):
-        """Delete a filesystem.
-
-        DELETE /fileSystems/{uid}
-        """
+        """Delete a filesystem (DELETE /fileSystems/{uid})."""
         params = {}
         if purge_from_obs:
             params['purge_from_obs'] = True
@@ -586,18 +489,12 @@ class WekaApiClient(object):
     # ------------------------------------------------------------------
 
     def list_filesystem_groups(self):
-        """Return all filesystem groups.
-
-        GET /fileSystemGroups
-        """
+        """Return all filesystem groups (GET /fileSystemGroups)."""
         result = self._get('/fileSystemGroups')
         return result.get('data', result)
 
     def get_filesystem_group(self, group_uid):
-        """Return a single filesystem group by UID.
-
-        GET /fileSystemGroups/{uid}
-        """
+        """Return one filesystem group (GET /fileSystemGroups/{uid})."""
         result = self._get(
             '/fileSystemGroups/{uid}'.format(uid=group_uid))
         return result.get('data', result)
@@ -611,10 +508,7 @@ class WekaApiClient(object):
 
     def create_filesystem_group(self, name, target_ssd_retention=None,
                                 start_demote=None):
-        """Create a new filesystem group.
-
-        POST /fileSystemGroups
-        """
+        """Create a filesystem group (POST /fileSystemGroups)."""
         payload = {'name': name}
         if target_ssd_retention is not None:
             payload['target_ssd_retention'] = target_ssd_retention
@@ -628,24 +522,17 @@ class WekaApiClient(object):
     # ------------------------------------------------------------------
 
     def list_nfs_permissions(self):
-        """Return all NFS export permissions.
-
-        GET /nfs/permissions
-        """
+        """Return all NFS export permissions (GET /nfs/permissions)."""
         result = self._get('/nfs/permissions')
         return result.get('data', result)
 
     def create_nfs_permission(self, client_group, fs_uid, path,
                               access_type='RW',
                               squash=None, anon_uid=None, anon_gid=None):
-        """Create an NFS export permission.
+        """Create an NFS export permission (POST /nfs/permissions).
 
-        POST /nfs/permissions
-
-        Weka v5.x uses 'filesystem' (name) and 'group' (name) rather
-        than UID-based fields; the access type field is 'permission_type'.
-        The caller should pass the filesystem name as fs_uid and the
-        client group name as client_group.
+        Weka v5 keys on names, not UIDs: pass the filesystem name as
+        *fs_uid* and the client group name as *client_group*.
         """
         payload = {
             'group': client_group,
@@ -664,37 +551,25 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def delete_nfs_permission(self, permission_uid):
-        """Delete an NFS export permission.
-
-        DELETE /nfs/permissions/{uid}
-        """
+        """Delete an NFS export permission (DELETE /nfs/permissions)."""
         return self._delete(
             '/nfs/permissions/{uid}'.format(uid=permission_uid))
 
     def list_client_groups(self):
-        """Return all NFS client groups.
-
-        GET /nfs/clientGroups
-        """
+        """Return all NFS client groups (GET /nfs/clientGroups)."""
         result = self._get('/nfs/clientGroups')
         return result.get('data', result)
 
     def create_client_group(self, name):
-        """Create a new NFS client group.
-
-        POST /nfs/clientGroups
-        """
+        """Create an NFS client group (POST /nfs/clientGroups)."""
         payload = {'name': name}
         result = self._post('/nfs/clientGroups', json=payload)
         return result.get('data', result)
 
     def add_client_group_rule(self, group_uid, rule_type, rule_value):
-        """Add a rule to an NFS client group.
+        """Add a rule to a client group (POST .../{uid}/rules).
 
-        POST /nfs/clientGroups/{uid}/rules
-
-        Weka v5.x uses {'ip': '<IP/mask>'} or {'dns': '<pattern>'}
-        (dotted-decimal subnet mask, not CIDR prefix).
+        Weka v5 takes {'ip': '<IP/dotted-mask>'} or {'dns': '<pattern>'}.
         """
         rule_type_lower = rule_type.lower()
         if rule_type_lower == 'ip':
@@ -707,30 +582,21 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def get_client_group(self, group_uid):
-        """Return a single NFS client group by UID.
-
-        GET /nfs/clientGroups/{uid}
-        """
+        """Return one NFS client group (GET /nfs/clientGroups/{uid})."""
         result = self._get(
             '/nfs/clientGroups/{uid}'.format(uid=group_uid))
         return result.get('data', result)
 
     def delete_client_group_rule(self, group_uid, rule_uid):
-        """Delete a single rule from an NFS client group.
-
-        DELETE /nfs/clientGroups/{uid}/rules/{rule_uid}
-        """
+        """Delete one rule from a client group (DELETE .../rules)."""
         return self._delete(
             '/nfs/clientGroups/{uid}/rules/{rule_uid}'.format(
                 uid=group_uid, rule_uid=rule_uid))
 
     def delete_client_group(self, group_uid):
-        """Delete an NFS client group and all its rules.
+        """Delete a client group, removing its rules first.
 
-        Weka requires all rules to be removed before the group can be
-        deleted.  This method fetches and removes any rules first.
-
-        DELETE /nfs/clientGroups/{uid}
+        Weka rejects the delete while any rule remains.
         """
         try:
             cg = self.get_client_group(group_uid)
@@ -750,18 +616,13 @@ class WekaApiClient(object):
     # Security policy methods (WEKAFS per-share IP access control)
     # ------------------------------------------------------------------
     #
-    # Security policies are CIDR-based Allow/Deny rules attached to a
-    # filesystem and enforced by the cluster at native (POSIX/DPDK) mount
-    # time: once any policy is attached, a client whose source IP matches
-    # no policy is denied, and a matching policy's read_only flag forces a
-    # read-only mount.  Policies are organization-owned, so these methods
-    # must be called on an org-scoped client (see for_org()).
+    # CIDR Allow/Deny rules attached to a filesystem and enforced at
+    # native mount time: once any policy is attached, an unmatched source
+    # IP is denied, and read_only forces a read-only mount.  Policies are
+    # organization-owned, so call these on an org-scoped client.
 
     def list_security_policies(self):
-        """Return all security policies in the authenticated org.
-
-        GET /security/policies
-        """
+        """Return the org's security policies (GET /security/policies)."""
         result = self._get('/security/policies')
         return result.get('data', result)
 
@@ -774,16 +635,7 @@ class WekaApiClient(object):
 
     def create_security_policy(self, name, ips, action='Allow',
                                read_only=False):
-        """Create a CIDR-based security policy.
-
-        POST /security/policies
-
-        :param name: Unique policy name within the organization.
-        :param ips: List of IPs / CIDRs / ranges the policy matches.
-        :param action: 'Allow' or 'Deny'.
-        :param read_only: Force matched mounts read-only when True.
-        :returns: Created policy dict (includes 'uid'/'id').
-        """
+        """Create a CIDR security policy (POST /security/policies)."""
         payload = {
             'name': name,
             'action': action,
@@ -795,18 +647,12 @@ class WekaApiClient(object):
 
     def update_security_policy(self, policy_uid,
                                add_ips=None, remove_ips=None):
-        """Incrementally add/remove IP ranges on a security policy.
+        """Add or remove addresses on a policy (PATCH /security/policies).
 
-        PATCH /security/policies/{uid}
-
-        add_ip/remove_ip amend the existing IP list in place without
-        replacing it.
-
-        Do NOT send 'name'.  The API treats a supplied name as a rename
-        request and rejects the policy's own current name with
-        "400 ... Security policy name already in use", which callers
-        that tolerate already-exists errors then swallow -- silently
-        dropping every incremental address change.
+        Never send 'name': the API reads it as a rename and rejects the
+        policy's own name with "already in use", which callers that
+        tolerate already-exists errors swallow -- silently dropping every
+        address change.
         """
         payload = {}
         if add_ips:
@@ -818,37 +664,25 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def delete_security_policy(self, policy_uid):
-        """Delete a security policy.
-
-        DELETE /security/policies/{uid}
-        """
+        """Delete a security policy (DELETE /security/policies/{uid})."""
         return self._delete(
             '/security/policies/{uid}'.format(uid=policy_uid))
 
     def get_fs_security_policies(self, fs_uid):
-        """Return the security policies attached to a filesystem.
-
-        GET /fileSystems/{uid}/securityPolicy
-        """
+        """Policies attached to a filesystem (GET .../securityPolicy)."""
         result = self._get(
             '/fileSystems/{uid}/securityPolicy'.format(uid=fs_uid))
         return result.get('data', result)
 
     def attach_fs_security_policies(self, fs_uid, policy_uids):
-        """Attach one or more security policies to a filesystem.
-
-        POST /fileSystems/{uid}/securityPolicy/attach
-        """
+        """Attach security policies to a filesystem (POST .../attach)."""
         result = self._post(
             '/fileSystems/{uid}/securityPolicy/attach'.format(uid=fs_uid),
             json={'policies': list(policy_uids)})
         return result.get('data', result)
 
     def detach_fs_security_policies(self, fs_uid, policy_uids):
-        """Detach one or more security policies from a filesystem.
-
-        POST /fileSystems/{uid}/securityPolicy/detach
-        """
+        """Detach security policies from a filesystem (POST .../detach)."""
         result = self._post(
             '/fileSystems/{uid}/securityPolicy/detach'.format(uid=fs_uid),
             json={'policies': list(policy_uids)})
@@ -859,11 +693,7 @@ class WekaApiClient(object):
     # ------------------------------------------------------------------
 
     def list_snapshots(self, fs_uid=None):
-        """Return all snapshots, optionally filtered by filesystem UID.
-
-        GET /snapshots does not support server-side filtering; filter
-        client-side using the 'filesystemUid' field returned per snapshot.
-        """
+        """Return all snapshots; any fs_uid filter is applied locally."""
         result = self._get('/snapshots')
         snaps = result.get('data', result)
         if fs_uid is not None:
@@ -872,10 +702,7 @@ class WekaApiClient(object):
         return snaps
 
     def get_snapshot(self, snap_uid):
-        """Return a single snapshot by UID.
-
-        GET /snapshots/{uid}
-        """
+        """Return one snapshot (GET /snapshots/{uid})."""
         result = self._get('/snapshots/{uid}'.format(uid=snap_uid))
         return result.get('data', result)
 
@@ -887,10 +714,7 @@ class WekaApiClient(object):
         return None
 
     def create_snapshot(self, fs_uid, name, is_writable=False):
-        """Create a new snapshot.
-
-        POST /snapshots
-        """
+        """Create a snapshot (POST /snapshots)."""
         payload = {
             'fs_uid': fs_uid,
             'name': name,
@@ -900,18 +724,11 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def delete_snapshot(self, snap_uid):
-        """Delete a snapshot.
-
-        DELETE /snapshots/{uid}
-        """
+        """Delete a snapshot (DELETE /snapshots/{uid})."""
         return self._delete('/snapshots/{uid}'.format(uid=snap_uid))
 
     def restore_snapshot(self, snap_uid, fs_uid):
-        """Restore (revert) a filesystem to a snapshot.
-
-        Weka v5 changed the endpoint to include the filesystem UID:
-        POST /snapshots/{fs_uid}/{uid}/restore  (Weka 5.x)
-        """
+        """Revert a filesystem to a snapshot (POST .../{fs}/{uid}/restore)."""
         result = self._post(
             '/snapshots/{fs_uid}/{uid}/restore'.format(
                 fs_uid=fs_uid, uid=snap_uid))
@@ -922,11 +739,9 @@ class WekaApiClient(object):
     # ------------------------------------------------------------------
 
     def get_capacity(self):
-        """Return cluster-wide capacity statistics.
+        """Return {totalBytes, usedBytes} for the cluster.
 
-        Tries GET /capacity (Weka 4.x); falls back to computing totals
-        from GET /drives (Weka 5.x removed the /capacity endpoint).
-        Returns a dict with totalBytes and usedBytes keys.
+        GET /capacity on Weka 4.x, summed from GET /drives on 5.x.
         """
         try:
             result = self._get('/capacity')

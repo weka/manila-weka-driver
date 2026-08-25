@@ -14,31 +14,11 @@
 
 """WekaFS POSIX client mount helper for the Manila share driver.
 
-Manages WekaFS kernel-client mounts on the Manila host.  The POSIX
-client is preferred over NFS exports because it provides:
-
-  - Sub-250 µs latency (no NFS protocol overhead)
-  - Full POSIX semantics (file locking, mmap, etc.)
-  - Adaptive page / dentry cache with coherency guarantees
-  - Native directory-quota enforcement
-  - Direct access to Weka filesystem metadata
-
-Mount command format::
-
-    mount -t wekafs [options] <backends>/<fs_name> <mount_point>
-
-where <backends> is a comma-separated list of Weka backend addresses,
-for example::
-
-    mount -t wekafs -o num_cores=1 10.0.0.1,10.0.0.2/my_fs /mnt/weka/my_fs
-
-Authenticated (auth_required) mount format points at a token file::
-
-    mount -t wekafs -o num_cores=1,auth_token_path=/path/token.json \\
-        10.0.0.1/auth_fs /mnt/weka/auth_fs
-
-where the token file is the JSON produced by ``weka user login``
-(``{"access_token": ..., "refresh_token": ..., "token_type": "Bearer"}``).
+Builds and runs ``mount -t wekafs [-o opts] <backends>/<fs_name> <dir>``
+on the Manila host.  Filesystems created with auth_required take an
+``auth_token_path=<file>`` option pointing at the JSON that ``weka user
+login`` writes.  Why the POSIX client is preferred over NFS is covered
+in doc/source/admin/weka_share_driver.rst.
 """
 
 import os
@@ -71,28 +51,9 @@ def _get_mount_lock(mount_point):
 class WekaMount(object):
     """Manages a single WekaFS POSIX mount on the Manila host.
 
-    Supports use as a context manager for temporary mounts::
-
-        with WekaMount(backends='10.0.0.1', fs_name='my_fs',
-                       mount_point='/mnt/weka/my_fs') as m:
-            path = m.get_or_create_share_path(
-                m.mount_point, 'share-uuid-1234')
-            # … work with share path …
-        # auto-unmount on exit
-
-    :param backends: Comma-separated string of Weka backend addresses.
-    :param fs_name: Weka filesystem name to mount.
-    :param mount_point: Local directory where the filesystem will be mounted.
-    :param auth_token_path: Optional path to a Weka auth-token JSON file,
-        required to mount filesystems created with authentication enabled
-        (auth_required). Produced by ``weka user login``.
-    :param num_cores: Number of POSIX client CPU cores (default 1).
-    :param net: Optional NIC name or DPDK identifier (e.g. "eth0").
-    :param read_cache: Enable client-side read cache (default True).
-    :param writecache: Enable write-back cache (default False).
-    :param sync_on_close: Flush on close (default False).
-    :param max_io_size: Override maximum IO size in bytes (optional).
-    :param iops_limit: IOPS limit for this mount (optional).
+    Usable as a context manager, which unmounts on exit.  A filesystem
+    created with auth_required needs *auth_token_path*, the JSON file
+    ``weka user login`` produces.
     """
 
     def __init__(self, backends, fs_name, mount_point,
@@ -138,12 +99,7 @@ class WekaMount(object):
     # ------------------------------------------------------------------
 
     def mount(self):
-        """Mount the WekaFS filesystem at self.mount_point.
-
-        Idempotent: if the filesystem is already mounted, returns immediately.
-
-        :raises WekaMountError: if the mount command fails.
-        """
+        """Mount at self.mount_point; idempotent if already mounted."""
         with self._lock:
             if self.is_mounted(self.mount_point):
                 LOG.debug(
@@ -154,9 +110,8 @@ class WekaMount(object):
 
             self._ensure_mount_point_dir(self.mount_point)
 
-            # A joined (stateful) Weka client mounts by bare filesystem
-            # name and reuses its existing cluster attachment; only a
-            # stateless client needs the explicit backends prefix.
+            # A joined client mounts by bare filesystem name, reusing its
+            # cluster attachment; only a stateless one needs the prefix.
             if self.backends:
                 source = '{backends}/{fs_name}'.format(
                     backends=self.backends, fs_name=self.fs_name)
@@ -179,11 +134,7 @@ class WekaMount(object):
                     reason='mount command failed: {}'.format(exc))
 
     def unmount(self, force=False):
-        """Unmount the WekaFS filesystem.
-
-        :param force: If True, use ``umount -l`` (lazy unmount).
-        :raises WekaUnmountError: if umount fails.
-        """
+        """Unmount the filesystem; *force* makes it a lazy umount."""
         with self._lock:
             if not self.is_mounted(self.mount_point):
                 LOG.debug(
@@ -204,10 +155,7 @@ class WekaMount(object):
 
     @staticmethod
     def is_mounted(mount_point):
-        """Return True if *mount_point* currently has a WekaFS mount.
-
-        Reads /proc/mounts to determine mount status.
-        """
+        """True if *mount_point* holds a WekaFS mount, per /proc/mounts."""
         try:
             with open('/proc/mounts', 'r') as fh:
                 for line in fh:
@@ -223,18 +171,7 @@ class WekaMount(object):
 
     def get_or_create_share_path(self, mount_point, sub_path,
                                  mode=_SHARE_DIR_MODE):
-        """Return the absolute path for a share sub-directory.
-
-        Creates the directory (and any parents) if it does not exist,
-        and sets permissions to *mode*.
-
-        :param mount_point: The mounted WekaFS root directory.
-        :param sub_path: Relative sub-path for the share (e.g. 'shares/uuid').
-        :param mode: POSIX permissions (default 0o777).
-        :returns: Absolute path string.
-        :raises WekaMountError: if directory creation fails.
-        """
-        # Normalise: strip leading slash from sub_path
+        """Return a share sub-directory path, creating it with *mode*."""
         sub_path = sub_path.lstrip('/')
         abs_path = os.path.join(mount_point, sub_path)
 
@@ -247,7 +184,6 @@ class WekaMount(object):
                     reason='Failed to create share directory {}: {}'.format(
                         abs_path, exc))
         else:
-            # Ensure correct permissions even if dir already exists.
             try:
                 os.chmod(abs_path, mode)
             except OSError as exc:
@@ -257,13 +193,7 @@ class WekaMount(object):
         return abs_path
 
     def remove_share_path(self, mount_point, sub_path, force=False):
-        """Remove a share sub-directory.
-
-        :param mount_point: The mounted WekaFS root directory.
-        :param sub_path: Relative sub-path of the share directory.
-        :param force: If True, remove the directory even if non-empty.
-        :raises WekaMountError: if removal fails.
-        """
+        """Remove a share sub-directory; *force* allows a non-empty one."""
         sub_path = sub_path.lstrip('/')
         abs_path = os.path.join(mount_point, sub_path)
 
@@ -284,14 +214,7 @@ class WekaMount(object):
                     abs_path, exc))
 
     def get_directory_inode(self, path):
-        """Return the inode number for *path*.
-
-        The inode is required to set directory quotas via the Weka API.
-
-        :param path: Absolute path to the directory.
-        :returns: Integer inode number.
-        :raises WekaMountError: if stat fails.
-        """
+        """Return the inode of *path*, as Weka directory quotas need."""
         try:
             return os.stat(path).st_ino
         except OSError as exc:
