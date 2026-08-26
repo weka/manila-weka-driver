@@ -247,12 +247,17 @@ fi
 # (WEKA_REPO is set in the self-update block at the top of the script.)
 if [ -d "${WEKA_REPO}/ci" ]; then
     log "Refreshing CI scripts from ${WEKA_REPO}/ci"
-    for f in ci-runner.sh post-results.sh collect-logs.sh \
-             gerrit-listener.py tempest-include.txt tempest-exclude.txt \
-             local.conf.template \
-             run-tempest.sh weka-org-cleanup.sh; do
-        [ -f "${WEKA_REPO}/ci/${f}" ] && cp "${WEKA_REPO}/ci/${f}" "${CI_DIR}/"
-    done
+    # Copy everything rather than an allowlist of filenames. The allowlist
+    # silently skipped patch-wekafs-protocol.py when it was added: ci-runner.sh
+    # was refreshed, the helper it now calls was not, and every job died on
+    # "No such file or directory". A list that has to be updated by hand
+    # whenever a file is added will go stale again.
+    #
+    # ci-env lives only on the VM (it holds credentials and is not in the
+    # repo), and copying the repo's files never removes it. -type f skips
+    # __pycache__ and any other directory, which plain cp would choke on.
+    find "${WEKA_REPO}/ci" -maxdepth 1 -type f -exec cp {} "${CI_DIR}/" \; \
+        || { log "ERROR: could not refresh CI scripts into ${CI_DIR}"; exit 1; }
     chmod +x "${CI_DIR}"/*.sh "${CI_DIR}"/*.py 2>/dev/null || true
 fi
 
