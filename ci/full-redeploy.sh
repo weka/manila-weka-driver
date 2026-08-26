@@ -262,19 +262,59 @@ fi
 # access_key. Check that change out over the master clone stack.sh pulled and
 # reinstall it editable so tempest discovers the patched tests.
 # https://review.opendev.org/c/openstack/manila-tempest-plugin/+/999687
-# Remove this block (revert to plain master) once 999687 merges.
+#
+# The patchset is resolved from Gerrit rather than hardcoded. It used to read
+# refs/changes/87/999687/1; the change reached patchset 3 and nobody noticed,
+# because fetching an old patchset still succeeds -- CI kept reporting on a
+# plugin two revisions behind the one that ships with the driver.
+#
+# This block retires itself: once 999687 merges, master carries the change and
+# the pin is skipped.
 TEMPEST_PLUGIN_DIR="/opt/stack/manila-tempest-plugin"
-TEMPEST_PLUGIN_REF="refs/changes/87/999687/1"
+TEMPEST_PLUGIN_CHANGE="999687"
+TEMPEST_PLUGIN_PROJECT="openstack%2Fmanila-tempest-plugin"
+
+# Echo "<status> <ref>" for the change's current patchset, or nothing.
+resolve_tempest_plugin_ref() {
+    local url attempt
+    url="https://review.opendev.org/changes/${TEMPEST_PLUGIN_PROJECT}~${TEMPEST_PLUGIN_CHANGE}?o=CURRENT_REVISION"
+    for attempt in 1 2 3; do
+        # Gerrit prefixes JSON with )]}' as XSSI protection; tail -c +6 drops it.
+        curl -sf --max-time 20 "$url" 2>/dev/null | tail -c +6 | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d["status"], d["revisions"][d["current_revision"]]["ref"])
+' 2>/dev/null && return 0
+        sleep $((attempt * 5))
+    done
+    return 1
+}
+
 if [ -d "${TEMPEST_PLUGIN_DIR}/.git" ]; then
-    log "Pinning manila-tempest-plugin to ${TEMPEST_PLUGIN_REF}"
-    if git -C "${TEMPEST_PLUGIN_DIR}" fetch \
+    if ! _resolved=$(resolve_tempest_plugin_ref); then
+        # Falling back to master would run tests that assert access_key is
+        # None for WEKAFS and fail every change under review. Stop instead:
+        # the cleanup trap marks the deploy broken, so ci-runner reports an
+        # infrastructure failure rather than voting against contributors.
+        log "ERROR: could not resolve change ${TEMPEST_PLUGIN_CHANGE} from Gerrit"
+        exit 1
+    fi
+    _status=${_resolved%% *}
+    TEMPEST_PLUGIN_REF=${_resolved#* }
+
+    if [ "$_status" = "MERGED" ]; then
+        log "Change ${TEMPEST_PLUGIN_CHANGE} has merged; using plugin master" \
+            "(this pin block can now be deleted)"
+    else
+        log "Pinning manila-tempest-plugin to ${TEMPEST_PLUGIN_REF}"
+        git -C "${TEMPEST_PLUGIN_DIR}" fetch \
             https://review.opendev.org/openstack/manila-tempest-plugin \
             "${TEMPEST_PLUGIN_REF}" 2>&1 \
-       && git -C "${TEMPEST_PLUGIN_DIR}" checkout FETCH_HEAD 2>&1; then
-        /opt/stack/data/venv/bin/pip install -e "${TEMPEST_PLUGIN_DIR}" -q \
-            2>&1 || log "WARNING: failed to reinstall manila-tempest-plugin"
-    else
-        log "WARNING: could not check out ${TEMPEST_PLUGIN_REF}; using master"
+            || { log "ERROR: could not fetch ${TEMPEST_PLUGIN_REF}"; exit 1; }
+        git -C "${TEMPEST_PLUGIN_DIR}" checkout FETCH_HEAD 2>&1 \
+            || { log "ERROR: could not check out ${TEMPEST_PLUGIN_REF}"; exit 1; }
+        /opt/stack/data/venv/bin/pip install -e "${TEMPEST_PLUGIN_DIR}" -q 2>&1 \
+            || { log "ERROR: could not reinstall manila-tempest-plugin"; exit 1; }
     fi
 fi
 
