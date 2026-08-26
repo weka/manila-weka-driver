@@ -103,15 +103,15 @@ function configure_manila_weka_driver {
     # Manila 2024.2 does not include WEKAFS in its hardcoded protocol list.
     local CONSTANTS_FILE="${MANILA_DIR}/manila/common/constants.py"
     if [ -f "${CONSTANTS_FILE}" ]; then
-        if grep -q "'WEKAFS'" "${CONSTANTS_FILE}"; then
-            echo "WEKAFS already present in Manila SUPPORTED_SHARE_PROTOCOLS"
-        else
-            sudo sed -i "s/SUPPORTED_SHARE_PROTOCOLS = (/SUPPORTED_SHARE_PROTOCOLS = (/;s/'MAPRFS')/'MAPRFS', 'WEKAFS')/" \
-                "${CONSTANTS_FILE}"
-            echo "Patched Manila constants.py to add WEKAFS to SUPPORTED_SHARE_PROTOCOLS"
-        fi
+        # Fatal on failure: manila-api refuses to start when
+        # enabled_share_protocols names a protocol missing from the tuple,
+        # and then every API call returns HTTP 500.
+        sudo python3 \
+            "${MANILA_WEKA_DRIVER_DIR}/ci/patch-wekafs-protocol.py" \
+            "${CONSTANTS_FILE}" \
+            || die $LINENO "Failed to add WEKAFS to SUPPORTED_SHARE_PROTOCOLS"
     else
-        echo "WARNING: Manila constants.py not found at ${CONSTANTS_FILE}"
+        die $LINENO "Manila constants.py not found at ${CONSTANTS_FILE}"
     fi
 }
 

@@ -19,6 +19,12 @@ CI_DIR="/opt/weka-ci"
 DEVSTACK_DIR="/opt/stack/devstack"
 LOCK_FILE="/var/lib/weka-ci/runner.lock"
 LOG_FILE="/var/lib/weka-ci/redeploy.log"
+BROKEN_MARKER="/var/lib/weka-ci/deploy-broken"
+
+# stack.sh needs well over the ~3 GiB Weka's default trace retention leaves
+# free on this 96 GB disk. Checked before teardown so a full disk skips the
+# run instead of destroying a working DevStack it then cannot rebuild.
+MIN_FREE_GB=25
 
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 exec > >(tee "$LOG_FILE") 2>&1
@@ -99,9 +105,22 @@ fi
 
 # Release the lock and bring the listener back on ANY exit, so a failed
 # redeploy never leaves the CI offline (it once stayed down for weeks).
+#
+# But a listener running over a broken DevStack is not neutral: it accepts
+# jobs and votes FAILURE on changes that are perfectly fine.  So record the
+# outcome in a marker file; ci-runner.sh reads it and reports an infra
+# failure instead of blaming the change.
 LISTENER_STOPPED=0
 cleanup() {
     local rc=$?
+    if [ "$rc" -eq 0 ]; then
+        sudo rm -f "$BROKEN_MARKER" 2>/dev/null || true
+    else
+        log "Marking deploy broken for ci-runner: ${BROKEN_MARKER}"
+        printf 'redeploy failed at %s (exit %s); see %s\n' \
+            "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$rc" "$LOG_FILE" \
+            | sudo tee "$BROKEN_MARKER" >/dev/null 2>&1 || true
+    fi
     if [ "$LISTENER_STOPPED" = "1" ]; then
         log "Ensuring CI listener is running"
         sudo systemctl start weka-manila-ci 2>/dev/null || true
@@ -110,6 +129,38 @@ cleanup() {
     exit "$rc"
 }
 trap cleanup EXIT
+
+# ── Cap Weka trace retention ──────────────────────────────────────────────────
+#
+# Weka's default is "50GB per IO-node, minimum 100GB", which a 96 GB root
+# disk can never satisfy: traces grow until only the 3 GiB reserve is left
+# and stack.sh dies out of space. Re-applied every run because the setting
+# is lost whenever the client container or cluster is rebuilt.
+
+log "Capping Weka trace retention (client-max 10GB, ensure-free 25GB)"
+if command -v weka >/dev/null 2>&1; then
+    weka debug traces retention set \
+        --client-max 10GB --client-ensure-free 25GB 2>&1 \
+        || log "WARNING: could not set trace retention; disk may fill"
+else
+    log "WARNING: weka CLI not found; skipping trace retention cap"
+fi
+
+# ── Pre-flight: disk space ────────────────────────────────────────────────────
+#
+# Before teardown, not after: an aborted run leaves the previous DevStack
+# serving, whereas tearing down first turns a full disk into an outage.
+
+FREE_GB=$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')
+log "Free space on /: ${FREE_GB}G (need ${MIN_FREE_GB}G)"
+if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$MIN_FREE_GB" ]; then
+    log "ERROR: only ${FREE_GB}G free on /; need ${MIN_FREE_GB}G to rebuild"
+    log "Largest consumers:"
+    sudo du -xh --max-depth=2 / 2>/dev/null | sort -rh | head -10 | \
+        while read -r line; do log "  ${line}"; done
+    log "Refusing to tear down a working DevStack it could not rebuild."
+    exit 1
+fi
 
 # ── Stop the listener ─────────────────────────────────────────────────────────
 

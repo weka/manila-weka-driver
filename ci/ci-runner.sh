@@ -30,6 +30,7 @@ TEMPEST_DIR="/opt/stack/tempest"
 WEKA_DRIVER_SRC="/opt/stack/manila-weka-driver/manila/share/drivers/weka"
 WEKA_DRIVER_DEST="${MANILA_DIR}/manila/share/drivers/weka"
 CONSTANTS_FILE="${MANILA_DIR}/manila/common/constants.py"
+BROKEN_MARKER="/var/lib/weka-ci/deploy-broken"
 LOG_BASE="/var/www/ci-logs"
 LOG_DIR="${LOG_BASE}/${CHANGE_NUM}/${PATCHSET_NUM}"
 
@@ -76,9 +77,9 @@ restore_clean_master() {
     # Keep the baseline driver in place so the backend works between jobs
     # (a driver-adding change leaves tracked files that the reset removes).
     ln -sfn "$WEKA_DRIVER_SRC" "$WEKA_DRIVER_DEST" 2>/dev/null || true
-    if ! grep -q "'WEKAFS'" "$CONSTANTS_FILE" 2>/dev/null; then
-        sed -i "s/'MAPRFS')/'MAPRFS', 'WEKAFS')/" "$CONSTANTS_FILE" 2>/dev/null || true
-    fi
+    # Not `|| true`: without WEKAFS in the tuple manila-api will not start
+    # (enabled_share_protocols lists it), so every later step fails anyway.
+    python3 "${CI_DIR}/patch-wekafs-protocol.py" "$CONSTANTS_FILE" || return 1
     kill_orphan_manila
     sudo systemctl restart devstack@m-shr devstack@m-api devstack@m-sch 2>&1 || return 1
 }
@@ -96,6 +97,21 @@ fail() {
     restore_clean_master || true
     exit "$exit_code"
 }
+
+# ── Phase 0: Refuse to run on a known-broken deploy ───────────────────────────
+#
+# full-redeploy.sh drops this marker when it fails. The listener is still
+# brought back up (so the CI is never silently offline), but testing against
+# a half-built DevStack produces a FAILURE that reads as the change's fault.
+# Say plainly that the infrastructure is broken instead.
+
+if [ -f "$BROKEN_MARKER" ]; then
+    log "Deploy is marked broken: $(cat "$BROKEN_MARKER" 2>/dev/null)"
+    fail "Weka CI infrastructure is down: the last DevStack redeploy failed, \
+so this change was NOT tested. This is not a problem with the change. The \
+Weka team has been notified; the CI will re-report once the environment is \
+rebuilt."
+fi
 
 # ── Phase 1: Reset Manila to clean master ─────────────────────────────────────
 
@@ -123,15 +139,20 @@ git fetch "https://review.opendev.org/openstack/manila" \
     "refs/changes/${CHANGE_SUFFIX}/${CHANGE_NUM}/${PATCHSET_NUM}" 2>&1 \
     || fail "Failed to fetch patch from Gerrit"
 
-CHERRY_PICK_FAILED=false
 # cherry-pick creates a commit, so it needs a committer identity (the stack
 # user has none configured); supply one inline.
+#
+# A conflict here is fatal. Continuing would test clean master (plus the
+# baseline driver injected below) and report a verdict that says nothing
+# about the change under review -- worse than no result, because a PASS
+# looks like the change was validated.
 if ! git -c user.email="weka-ci@weka.io" -c user.name="Weka Manila CI" \
         cherry-pick FETCH_HEAD 2>&1; then
-    log "WARNING: Cherry-pick failed (merge conflict)"
     git cherry-pick --abort 2>/dev/null || true
     git reset --hard origin/master 2>&1
-    CHERRY_PICK_FAILED=true
+    fail "Cherry-pick onto master failed (merge conflict). The change does \
+not merge with the current master and cannot be tested -- please rebase and \
+upload a new patchset."
 fi
 
 # ── Phase 2.5: Ensure the Weka driver + WEKAFS protocol are present ───────────
@@ -146,11 +167,8 @@ if [ ! -f "${WEKA_DRIVER_DEST}/driver.py" ]; then
         || fail "Failed to symlink Weka driver into Manila"
 fi
 
-if ! grep -q "'WEKAFS'" "$CONSTANTS_FILE" 2>/dev/null; then
-    sed -i "s/'MAPRFS')/'MAPRFS', 'WEKAFS')/" "$CONSTANTS_FILE" \
-        || fail "Failed to patch WEKAFS into Manila constants"
-    log "Patched WEKAFS into SUPPORTED_SHARE_PROTOCOLS"
-fi
+python3 "${CI_DIR}/patch-wekafs-protocol.py" "$CONSTANTS_FILE" \
+    || fail "Failed to patch WEKAFS into Manila constants"
 
 # (The WEKAFS tempest subclass is injected by run-tempest.sh just before the
 # test passes; no need to inject here too.)
@@ -272,10 +290,7 @@ log "Phase 6: Collecting logs"
 END_TIME=$(date +%s)
 TOTAL_DURATION=$((END_TIME - START_TIME))
 
-if [ "$CHERRY_PICK_FAILED" = "true" ]; then
-    RESULT="FAILURE"
-    MSG="Cherry-pick failed (merge conflict). Tested against clean master. Tempest: exit ${TEMPEST_RC} (${TEMPEST_DURATION}s). Total: ${TOTAL_DURATION}s"
-elif [ "$TEMPEST_RC" -eq 0 ]; then
+if [ "$TEMPEST_RC" -eq 0 ]; then
     RESULT="SUCCESS"
     # Extract test counts from tempest output
     SUMMARY=$(tail -5 "${LOG_DIR}/tempest.log" | grep -E "Ran|passed|failed" | head -1 || echo "")
