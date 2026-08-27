@@ -210,7 +210,6 @@ class TestWekaMountMount(test.TestCase):
         self.assertEqual(_FS_NAME, source_arg)
 
     def test_mount_raises_on_makedirs_oserror(self):
-        """_ensure_mount_point_dir OSError is wrapped in WekaMountError."""
         m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
@@ -300,7 +299,6 @@ class TestWekaMountContextManager(test.TestCase):
         mock_um.assert_called_once()
 
     def test_context_manager_swallows_unmount_exception(self):
-        """__exit__ logs a warning but does not propagate unmount errors."""
         m = _make_mount()
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
@@ -337,7 +335,6 @@ class TestWekaMountSharePath(test.TestCase):
         chmod.assert_called_once()
 
     def test_get_or_create_share_path_makedirs_oserror(self):
-        """makedirs OSError on new dir is wrapped in WekaMountError."""
         m = _make_mount()
         with mock.patch('os.path.isdir', return_value=False):
             with mock.patch('os.makedirs',
@@ -348,7 +345,6 @@ class TestWekaMountSharePath(test.TestCase):
                     '/mnt/weka/fs', 'my-share')
 
     def test_get_or_create_share_path_chmod_failure_warns(self):
-        """chmod failure on an existing dir logs a warning, path returned."""
         m = _make_mount()
         with mock.patch('os.path.isdir', return_value=True):
             with mock.patch('os.chmod', side_effect=OSError('eperm')):
@@ -387,7 +383,6 @@ class TestWekaMountSharePath(test.TestCase):
         rmtree.assert_called_once_with('/mnt/weka/fs/my-share')
 
     def test_remove_share_path_raises_on_oserror(self):
-        """rmtree OSError is wrapped in WekaMountError."""
         m = _make_mount()
         with mock.patch('os.path.exists', return_value=True):
             with mock.patch('shutil.rmtree',

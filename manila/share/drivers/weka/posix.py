@@ -32,10 +32,8 @@ from manila.share.drivers.weka import exceptions
 
 LOG = logging.getLogger(__name__)
 
-# Default permissions for Manila share sub-directories on the mount.
 _SHARE_DIR_MODE = 0o777
 
-# Per-mount-point lock registry to prevent concurrent mount/unmount races.
 _MOUNT_LOCKS = {}
 _MOUNT_LOCKS_LOCK = threading.Lock()
 
@@ -78,10 +76,6 @@ class WekaMount(object):
         self.iops_limit = iops_limit
         self._lock = _get_mount_lock(mount_point)
 
-    # ------------------------------------------------------------------
-    # Context manager
-    # ------------------------------------------------------------------
-
     def __enter__(self):
         self.mount()
         return self
@@ -93,10 +87,6 @@ class WekaMount(object):
             LOG.warning("Failed to unmount %s on context exit: %s",
                         self.mount_point, exc)
         return False  # do not suppress exceptions
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def mount(self):
         """Mount at self.mount_point; idempotent if already mounted."""
@@ -220,10 +210,6 @@ class WekaMount(object):
         except OSError as exc:
             raise exceptions.WekaMountError(
                 reason='Failed to stat {}: {}'.format(path, exc))
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
 
     def _build_mount_options(self):
         """Build the list of WekaFS mount options."""

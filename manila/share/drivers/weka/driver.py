@@ -45,7 +45,6 @@ LOG = logging.getLogger(__name__)
 
 CONF = cfg.CONF
 
-# Driver version — increment on each release.
 DRIVER_VERSION = '1.0.0'
 
 _WEKAFS_PROTO = 'WEKAFS'
@@ -152,13 +151,8 @@ class WekaShareDriver(driver.ShareDriver):
         self._async_copies = {}
         self._async_copies_lock = threading.Lock()
         self._nfs_server = None
-        # project_id -> org-scoped client (WEKAFS isolation).
         self._org_clients = {}
         self._org_lock = threading.Lock()
-
-    # ------------------------------------------------------------------
-    # Setup / validation
-    # ------------------------------------------------------------------
 
     def do_setup(self, context):
         """Initialise the driver: create API client, verify connectivity."""
@@ -281,10 +275,6 @@ class WekaShareDriver(driver.ShareDriver):
                 LOG.warning(
                     "Could not verify cluster status during setup: %s", exc)
 
-    # ------------------------------------------------------------------
-    # Share lifecycle
-    # ------------------------------------------------------------------
-
     def create_share(self, context, share, share_server=None):
         """Create a Weka filesystem and return its export locations."""
         share_proto = share['share_proto'].upper()
@@ -316,8 +306,6 @@ class WekaShareDriver(driver.ShareDriver):
             client=client, auth_required=auth_required)
         fs_uid = fs['uid']
 
-        # Attach the share type's shared policy group so access is
-        # enforced from creation (no-op without a group).
         if self._is_isolated_wekafs(share):
             self._ensure_group_policies(share, fs_uid)
 
@@ -792,10 +780,6 @@ class WekaShareDriver(driver.ShareDriver):
         return self._build_export_locations(
             share, fs_name, fs_uid, share_proto)
 
-    # ------------------------------------------------------------------
-    # Access control
-    # ------------------------------------------------------------------
-
     def update_access(self, context, share, access_rules, add_rules,
                       delete_rules, update_rules=None, share_server=None):
         """Update access rules, in either contract mode.
@@ -817,7 +801,6 @@ class WekaShareDriver(driver.ShareDriver):
         if full_sync:
             add_rules = list(access_rules or [])
 
-        # Level changes re-apply through the same idempotent path as adds.
         apply_rules = add_rules + update_rules
 
         # create_share rejects every other protocol, so there is no third
@@ -929,8 +912,6 @@ class WekaShareDriver(driver.ShareDriver):
                 ) % rule['access_to']
             )
 
-        # Get-or-create, so a re-apply neither hits a duplicate-name error
-        # nor leaks a second group.
         cg = self._get_client_group_by_name(cg_name)
         if cg is None:
             cg = self._client.create_client_group(cg_name)
@@ -1186,7 +1167,6 @@ class WekaShareDriver(driver.ShareDriver):
                         raise
             return
 
-        # present is False -> remove the IP.
         if pol is None:
             return
         current = self._policy_ips(pol)
@@ -1239,10 +1219,6 @@ class WekaShareDriver(driver.ShareDriver):
                 cg_names.add(cg_name)
         for cg_name in cg_names:
             self._delete_client_group_by_name(cg_name)
-
-    # ------------------------------------------------------------------
-    # Snapshots
-    # ------------------------------------------------------------------
 
     def create_snapshot(self, context, snapshot, share_server=None):
         """Create a snapshot of a share's underlying filesystem."""
@@ -1305,10 +1281,6 @@ class WekaShareDriver(driver.ShareDriver):
         )
         client.restore_snapshot(snap['uid'], fs_uid)
 
-    # ------------------------------------------------------------------
-    # Statistics
-    # ------------------------------------------------------------------
-
     def _update_share_stats(self, data=None):
         """Collect and publish backend statistics to Manila."""
         try:
@@ -1358,10 +1330,6 @@ class WekaShareDriver(driver.ShareDriver):
             }],
         }
         super(WekaShareDriver, self)._update_share_stats(stats)
-
-    # ------------------------------------------------------------------
-    # Manage / unmanage
-    # ------------------------------------------------------------------
 
     def manage_existing(self, share, driver_options):
         """Adopt an existing Weka filesystem as a Manila share.
@@ -1437,17 +1405,9 @@ class WekaShareDriver(driver.ShareDriver):
             share['id'], self._share_name(share['id']),
         )
 
-    # ------------------------------------------------------------------
-    # Network
-    # ------------------------------------------------------------------
-
     def get_network_allocations_number(self):
         """Return 0 — this driver manages its own networking via Weka."""
         return 0
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
 
     def _share_name(self, share_id):
         """Filesystem name for a share ID (32-char cluster limit)."""
@@ -1473,10 +1433,6 @@ class WekaShareDriver(driver.ShareDriver):
     def _get_backends(self):
         """Return the Weka backend address string for POSIX mounts."""
         return self.configuration.safe_get('weka_api_server') or ''
-
-    # ------------------------------------------------------------------
-    # Per-tenant organization helpers (WEKAFS isolation)
-    # ------------------------------------------------------------------
 
     def _org_name(self, project_id):
         """Organization name for a project: prefix + undashed project_id.
@@ -1518,10 +1474,6 @@ class WekaShareDriver(driver.ShareDriver):
     def _org_mount_user(self):
         """Least-privilege (Regular) username tenants use to mount."""
         return '{}-mnt'.format(self._org_user)
-
-    # ------------------------------------------------------------------
-    # Security policy helpers (WEKAFS per-share IP access control)
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _policy_uid(policy):
@@ -1804,7 +1756,6 @@ class WekaShareDriver(driver.ShareDriver):
             if path:
                 candidate = (path.rsplit('/', 1)[-1]
                              if '/' in path else path)
-                # Strip NFS server prefix (server:/fs_name → fs_name)
                 if ':' in candidate:
                     candidate = candidate.split(':', 1)[-1].lstrip('/')
                 if candidate:

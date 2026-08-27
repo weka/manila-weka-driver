@@ -16,18 +16,10 @@
 
 from oslo_utils import uuidutils
 
-# ---------------------------------------------------------------------------
-# Helper generators
-# ---------------------------------------------------------------------------
-
 
 def _uid():
     return uuidutils.generate_uuid()
 
-
-# ---------------------------------------------------------------------------
-# Fake Weka API response payloads
-# ---------------------------------------------------------------------------
 
 FAKE_FS_UID = 'fs-uid-1234'
 # Must match _share_name('share-uuid-1234'): prefix 'manila_' + hex-stripped ID
@@ -199,10 +191,6 @@ def fake_quota(inode_id=12345, hard_limit=10 * 1024 ** 3,
         'usedBytes': used_bytes,
     }
 
-
-# ---------------------------------------------------------------------------
-# Fake Manila share / snapshot models
-# ---------------------------------------------------------------------------
 
 FAKE_SHARE_ID = 'share-uuid-1234'
 FAKE_SNAPSHOT_ID = 'snapshot-uuid-0001'

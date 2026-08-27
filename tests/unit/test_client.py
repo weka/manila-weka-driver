@@ -125,7 +125,6 @@ class TestWekaApiClientAuth(test.TestCase):
             self.assertRaises(weka_exc.WekaAuthError, c.login)
 
     def test_login_lockout_403_backs_off_and_raises(self):
-        """403 lockout → sleeps capped duration then raises WekaApiError."""
         c = self._make_client()
         resp = _make_response(
             403, {'message': 'locked out for 2 minutes'})
@@ -149,7 +148,6 @@ class TestWekaApiClientAuth(test.TestCase):
         mock_sleep.assert_called_once_with(150)
 
     def test_login_non_lockout_403_raises_without_sleep(self):
-        """A 403 that is NOT a lockout should raise without sleeping."""
         c = self._make_client()
         resp = _make_response(403, {'message': 'forbidden'})
         with mock.patch.object(c._session, 'post', return_value=resp):
@@ -179,7 +177,6 @@ class TestWekaApiClientAuth(test.TestCase):
         mock_sleep.assert_not_called()
 
     def test_parse_lockout_seconds_no_match_returns_none(self):
-        """_parse_lockout_seconds returns None when no duration pattern."""
         c = self._make_client()
         result = c._parse_lockout_seconds('some other error message')
         self.assertIsNone(result)
@@ -207,7 +204,6 @@ class TestWekaApiClientAuth(test.TestCase):
         self.assertEqual(403, ctx.exception.status_code)
 
     def test_login_lockout_unparseable_duration_uses_default(self):
-        """A lockout with no parseable duration backs off a safe default."""
         c = self._make_client()
         resp = _make_response(403, {'data': 'user account is locked out'})
         with mock.patch.object(c._session, 'post', return_value=resp):
@@ -363,7 +359,6 @@ class TestWekaApiClientFilesystems(test.TestCase):
         self.assertEqual({}, result)
 
     def test_delete_filesystem_purge_from_obs(self):
-        """purge_from_obs=True is forwarded as a query param."""
         resp = _make_response(200, {})
         resp.content = b''
         captured = {}
@@ -871,7 +866,6 @@ class TestWekaApiClientRetry(test.TestCase):
         self.client._access_token = 'tok'
 
     def test_retry_5xx_logs_warning_and_succeeds(self):
-        """5xx triggers retry with LOG.warning; succeeds on last attempt."""
         err_resp = _make_response(500, {'message': 'server error'})
         ok_resp = _make_response(200, {'data': []})
         with mock.patch.object(
@@ -882,7 +876,6 @@ class TestWekaApiClientRetry(test.TestCase):
         self.assertEqual(ok_resp, result)
 
     def test_retry_5xx_exhausted_raises(self):
-        """5xx on all attempts raises WekaApiError after max_retries."""
         err_resp = _make_response(503, {'message': 'unavailable'})
         with mock.patch.object(
                 self.client._session, 'request',
@@ -903,7 +896,6 @@ class TestWekaApiClientDelete(test.TestCase):
         self.client._access_token = 'tok'
 
     def test_delete_with_content_returns_json(self):
-        """_delete returns parsed JSON when response has a body."""
         resp = _make_response(200, {'deleted': True})
         resp.content = b'{"deleted": true}'
         with mock.patch.object(self.client._session, 'request',
@@ -912,7 +904,6 @@ class TestWekaApiClientDelete(test.TestCase):
         self.assertEqual({'deleted': True}, result)
 
     def test_delete_with_content_malformed_json_returns_empty(self):
-        """_delete falls back to {} when body is non-JSON."""
         resp = mock.Mock()
         resp.status_code = 200
         resp.content = b'not-json'
@@ -924,7 +915,6 @@ class TestWekaApiClientDelete(test.TestCase):
         self.assertEqual({}, result)
 
     def test_delete_no_content_returns_empty(self):
-        """_delete returns {} when response body is empty."""
         resp = _make_response(200, {})
         resp.content = b''
         with mock.patch.object(self.client._session, 'request',
@@ -943,7 +933,6 @@ class TestWekaApiClientPatch(test.TestCase):
         self.client._access_token = 'tok'
 
     def test_patch_sends_patch_method(self):
-        """_patch calls the API with method PATCH."""
         resp = _make_response(200, {'data': {'ok': True}})
 
         def check(method, url, **kwargs):
@@ -967,7 +956,6 @@ class TestWekaApiClientRefreshFallback(test.TestCase):
         self.client._refresh_token = 'bad-refresh'
 
     def test_refresh_post_exception_falls_back_to_login(self):
-        """Network error during refresh POST causes fallback to full login."""
         with mock.patch.object(
                 self.client._session, 'post',
                 side_effect=Exception('connection error')):
@@ -986,7 +974,6 @@ class TestCreateOrganizationOptionalKwargs(test.TestCase):
         self.client._access_token = 'tok'
 
     def test_create_organization_with_ssd_quota(self):
-        """ssd_quota appears in request body when provided."""
         captured = {}
 
         def check(method, url, **kwargs):
@@ -1001,7 +988,6 @@ class TestCreateOrganizationOptionalKwargs(test.TestCase):
         self.assertNotIn('total_quota', captured['json'])
 
     def test_create_organization_with_total_quota(self):
-        """total_quota appears in request body when provided."""
         captured = {}
 
         def check(method, url, **kwargs):
@@ -1036,7 +1022,6 @@ class TestCreateFilesystemOptionalKwargs(test.TestCase):
             self.client._session, 'request', side_effect=check), captured
 
     def test_create_filesystem_with_ssd_capacity(self):
-        """ssd_capacity included in payload when provided."""
         patch, captured = self._capture_post()
         with patch:
             self.client.create_filesystem(
@@ -1045,7 +1030,6 @@ class TestCreateFilesystemOptionalKwargs(test.TestCase):
         self.assertEqual(5 * 1024 ** 3, captured['json']['ssd_capacity'])
 
     def test_create_filesystem_with_obs_buckets(self):
-        """obs_buckets included in payload when provided."""
         patch, captured = self._capture_post()
         with patch:
             self.client.create_filesystem(
@@ -1054,7 +1038,6 @@ class TestCreateFilesystemOptionalKwargs(test.TestCase):
         self.assertEqual(['bucket-uid-1'], captured['json']['obs_buckets'])
 
     def test_create_filesystem_with_data_reduction(self):
-        """data_reduction included in payload when provided."""
         patch, captured = self._capture_post()
         with patch:
             self.client.create_filesystem(
@@ -1083,28 +1066,24 @@ class TestUpdateFilesystemOptionalKwargs(test.TestCase):
             self.client._session, 'request', side_effect=check), captured
 
     def test_update_filesystem_with_name(self):
-        """name appears in PUT payload."""
         patch, captured = self._capture_put()
         with patch:
             self.client.update_filesystem('fs-1', name='new-name')
         self.assertEqual('new-name', captured['json']['name'])
 
     def test_update_filesystem_with_ssd_capacity(self):
-        """ssd_capacity appears in PUT payload."""
         patch, captured = self._capture_put()
         with patch:
             self.client.update_filesystem('fs-1', ssd_capacity=1024)
         self.assertEqual(1024, captured['json']['ssd_capacity'])
 
     def test_update_filesystem_with_auth_required(self):
-        """auth_required appears in PUT payload."""
         patch, captured = self._capture_put()
         with patch:
             self.client.update_filesystem('fs-1', auth_required=True)
         self.assertTrue(captured['json']['auth_required'])
 
     def test_update_filesystem_with_data_reduction(self):
-        """data_reduction appears in PUT payload."""
         patch, captured = self._capture_put()
         with patch:
             self.client.update_filesystem('fs-1', data_reduction=False)
@@ -1121,7 +1100,6 @@ class TestGetFilesystemGroup(test.TestCase):
         self.client._access_token = 'tok'
 
     def test_get_filesystem_group(self):
-        """get_filesystem_group returns data for a UID."""
         grp = {'uid': 'grp-1', 'name': 'default'}
         resp = _make_response(200, {'data': grp})
         with mock.patch.object(self.client._session, 'request',
@@ -1150,7 +1128,6 @@ class TestCreateFilesystemGroupOptionalKwargs(test.TestCase):
             self.client._session, 'request', side_effect=check), captured
 
     def test_create_filesystem_group_with_target_ssd_retention(self):
-        """target_ssd_retention in payload when provided."""
         patch, captured = self._capture_post()
         with patch:
             self.client.create_filesystem_group(
@@ -1158,7 +1135,6 @@ class TestCreateFilesystemGroupOptionalKwargs(test.TestCase):
         self.assertEqual(86400, captured['json']['target_ssd_retention'])
 
     def test_create_filesystem_group_with_start_demote(self):
-        """start_demote in payload when provided."""
         patch, captured = self._capture_post()
         with patch:
             self.client.create_filesystem_group('grp1', start_demote=10)
@@ -1185,7 +1161,6 @@ class TestCreateNfsPermissionOptionalKwargs(test.TestCase):
             self.client._session, 'request', side_effect=check), captured
 
     def test_create_nfs_permission_with_squash(self):
-        """root_squashing in payload when squash is provided."""
         patch, captured = self._capture_post()
         with patch:
             self.client.create_nfs_permission(
@@ -1193,7 +1168,6 @@ class TestCreateNfsPermissionOptionalKwargs(test.TestCase):
         self.assertEqual('root', captured['json']['root_squashing'])
 
     def test_create_nfs_permission_with_anon_uid(self):
-        """anon_uid in payload when provided."""
         patch, captured = self._capture_post()
         with patch:
             self.client.create_nfs_permission(
@@ -1201,7 +1175,6 @@ class TestCreateNfsPermissionOptionalKwargs(test.TestCase):
         self.assertEqual(65534, captured['json']['anon_uid'])
 
     def test_create_nfs_permission_with_anon_gid(self):
-        """anon_gid in payload when provided."""
         patch, captured = self._capture_post()
         with patch:
             self.client.create_nfs_permission(
@@ -1219,7 +1192,6 @@ class TestDeleteClientGroup(test.TestCase):
         self.client._access_token = 'tok'
 
     def test_delete_client_group_rule(self):
-        """delete_client_group_rule issues DELETE to the rule endpoint."""
         resp = _make_response(200, {})
         resp.content = b''
         with mock.patch.object(self.client._session, 'request',
@@ -1230,7 +1202,6 @@ class TestDeleteClientGroup(test.TestCase):
         self.assertIn('rule-1', url)
 
     def test_delete_client_group_with_rules(self):
-        """Rules are deleted before group; errors are suppressed."""
         cg = {'uid': 'cg-1', 'name': 'grp',
               'rules': [{'uid': 'r-1'}, {'uid': 'r-2'}]}
         with mock.patch.object(self.client, 'get_client_group',
@@ -1245,7 +1216,6 @@ class TestDeleteClientGroup(test.TestCase):
         self.assertEqual(2, del_rule.call_count)
 
     def test_delete_client_group_rule_error_suppressed(self):
-        """Rule deletion error does not propagate; group delete proceeds."""
         cg = {'uid': 'cg-1', 'name': 'grp', 'rules': [{'uid': 'r-1'}]}
         resp = _make_response(200, {})
         resp.content = b''
@@ -1260,7 +1230,6 @@ class TestDeleteClientGroup(test.TestCase):
         self.assertEqual({}, result)
 
     def test_delete_client_group_get_error_suppressed(self):
-        """get_client_group error is suppressed; final DELETE still runs."""
         resp = _make_response(200, {})
         resp.content = b''
         with mock.patch.object(self.client, 'get_client_group',
@@ -1281,7 +1250,6 @@ class TestGetCapacityFallback(test.TestCase):
         self.client._access_token = 'tok'
 
     def test_get_capacity_falls_back_to_drives(self):
-        """get_capacity computes totals from /drives when /capacity fails."""
         drives = [
             {'size_bytes': 1000, 'percentage_used': 50},
             {'size_bytes': 2000, 'percentage_used': 25},
@@ -1302,7 +1270,6 @@ class TestGetCapacityFallback(test.TestCase):
         self.assertEqual(500 + 500, result['usedBytes'])
 
     def test_get_capacity_drives_not_list_returns_empty(self):
-        """get_capacity returns {} when /drives returns non-list data."""
         def _get_side_effect(path, params=None):
             if path == '/capacity':
                 raise weka_exc.WekaNotFound(reason='not found')

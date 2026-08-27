@@ -145,7 +145,6 @@ class TestWekaShareDriverSetup(test.TestCase):
     @mock.patch('manila.share.drivers.weka.client.WekaApiClient')
     def test_do_setup_rejects_org_prefix_with_separator(
             self, mock_client_cls):
-        """A prefix with a path separator is rejected at setup."""
         drv = self._make_driver(weka_org_prefix='../evil-')
         mock_client = mock.Mock()
         mock_client.get_cluster_status.return_value = (
@@ -318,8 +317,6 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
         return fakes.fake_share(
             share_id=fakes.FAKE_NEW_SHARE_ID, proto=proto)
 
-    # ── Pre-condition failures ────────────────────────────────────────────
-
     def test_snapshot_not_found_raises(self):
         drv = self._make_driver()
         drv._client.get_snapshot_by_name.return_value = None
@@ -331,12 +328,6 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
         drv._client.create_filesystem.assert_not_called()
 
     def test_no_nfs_server_raises_before_fs_create(self):
-        """create_share_from_snapshot raises fast when NFS server absent.
-
-        With NFS protocol and no weka_nfs_server configured the outer
-        function must raise ShareBackendException before creating the
-        filesystem or spawning the copy greenlet.
-        """
         drv = self._make_driver(nfs_server=None)
         drv._client.get_snapshot_by_name.return_value = fakes.fake_snapshot()
         drv._client.get_filesystem.return_value = fakes.fake_filesystem()
@@ -347,12 +338,9 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
             fakes.fake_snapshot_model())
         drv._client.create_filesystem.assert_not_called()
 
-    # ── Async dispatch ────────────────────────────────────────────────────
-
     @mock.patch(_PATCH_THREAD)
     def test_create_from_snapshot_returns_creating_status(
             self, mock_thread):
-        """create_share_from_snapshot returns dict with creating status."""
         drv = self._make_driver()
         snap, new_fs, _ = self._setup_happy_path_client(drv)
 
@@ -367,8 +355,6 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
         self.assertGreater(len(result['export_locations']), 0)
         mock_thread.assert_called_once()
 
-    # ── Happy path copy logic ─────────────────────────────────────────────
-
     @mock.patch(_PATCH_SLEEP)
     @mock.patch(_PATCH_SOCKET)
     @mock.patch(_PATCH_RMDIR)
@@ -379,7 +365,6 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
     def test_happy_path_nfs_copy(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """_copy_snapshot_nfs: full success — mounts, rsync, cleanup."""
         drv = self._make_driver()
         self._setup_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = (
@@ -432,12 +417,9 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
                               "backends must be None for bare-fs mount")
         mock_rsync.assert_called_once()
 
-    # ── Isolation-enabled create-from-snapshot ────────────────────────────
-
     @mock.patch(_PATCH_THREAD)
     def test_create_from_snapshot_isolation_uses_org_client(
             self, mock_thread):
-        """Snapshot + fs lookups and fs creation go via the org client."""
         drv, org_client = self._make_iso_driver()
         org_client.get_snapshot_by_name.return_value = fakes.fake_snapshot()
         org_client.get_filesystem.return_value = fakes.fake_filesystem()
@@ -497,7 +479,6 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
     def test_happy_path_nfs_protocol_returns_nfs_path(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """create_share_from_snapshot with NFS proto returns nfs path."""
         drv = self._make_driver()
         self._setup_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = (
@@ -515,8 +496,6 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
             result['status'])
         self.assertIn(':/', result['export_locations'][0]['path'])
 
-    # ── Failure paths — verify cleanup runs ──────────────────────────────
-
     @mock.patch(_PATCH_SLEEP)
     @mock.patch(_PATCH_SOCKET)
     @mock.patch(_PATCH_RMDIR)
@@ -527,11 +506,6 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
     def test_src_mount_fails_reraises_and_cleans_up(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """Src mount failure in _copy_snapshot_nfs: exception re-raised.
-
-        No umounts (nothing was mounted); NFS permissions and client
-        group still deleted.
-        """
         drv = self._make_driver()
         self._setup_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = (
@@ -561,7 +535,6 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
     def test_dst_mount_fails_reraises_and_cleans_up(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """Dst mount failure: src is unmounted, perms and CG deleted."""
         drv = self._make_driver()
         self._setup_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = (
@@ -595,7 +568,6 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
     def test_rsync_fails_reraises_and_cleans_up(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """Rsync failure: both mounts unmounted, perms and CG deleted."""
         drv = self._make_driver()
         self._setup_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = (
@@ -614,8 +586,6 @@ class TestWekaShareDriverCreateFromSnapshot(test.TestCase):
         self.assertEqual(2, mock_umount.call_count)
         drv._client.delete_nfs_permission.assert_called()
         drv._client.delete_client_group.assert_called_once()
-
-    # ── Cleanup resilience ───────────────────────────────────────────────
 
     @mock.patch(_PATCH_SLEEP)
     @mock.patch(_PATCH_SOCKET)
@@ -927,7 +897,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         drv._client.create_nfs_permission.assert_called_once()
 
     def test_update_access_nfs_full_sync_prunes_stale_rules(self):
-        """Full sync removes backend resources with no matching rule."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='NFS')
         fs_name = drv._share_name(share['id'])
@@ -976,7 +945,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         drv._client.delete_client_group.assert_called_once_with('cg-stale')
 
     def test_update_access_nfs_full_sync_prunes_all_when_no_rules(self):
-        """An empty rule set revokes every backend resource."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='NFS')
         fs_name = drv._share_name(share['id'])
@@ -1000,7 +968,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         drv._client.delete_client_group.assert_called_once_with('cg-stale')
 
     def test_update_access_nfs_prune_permission_failure_is_tolerated(self):
-        """A failed permission delete is logged, not raised."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='NFS')
         fs_name = drv._share_name(share['id'])
@@ -1021,7 +988,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         drv._client.delete_client_group.assert_not_called()
 
     def test_update_access_nfs_prune_client_group_failure_is_tolerated(self):
-        """A failed client-group delete is logged, not raised."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='NFS')
         fs_name = drv._share_name(share['id'])
@@ -1060,7 +1026,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         self.assertEqual('error', result[rule_id]['state'])
 
     def test_update_access_wekafs_ip_rule_creates_policy(self):
-        """A WEKAFS ip rule installs a per-share Allow security policy."""
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
             fakes.fake_filesystem())
@@ -1093,7 +1058,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         drv._client.create_client_group.assert_not_called()
 
     def test_update_access_wekafs_ro_ip_rule_is_read_only_policy(self):
-        """An ro ip rule creates a read-only per-share policy."""
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
             fakes.fake_filesystem())
@@ -1115,7 +1079,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         self.assertTrue(kwargs['read_only'])
 
     def test_update_access_wekafs_user_rule_grants_credential_no_policy(self):
-        """A user rule grants the org credential but no IP policy."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         rule = fakes.fake_access_rule(access_type='user',
@@ -1134,7 +1097,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         drv._client.create_security_policy.assert_not_called()
 
     def test_update_access_wekafs_full_sync_prunes_stale_policy_ip(self):
-        """Full sync drops policy IPs with no matching ip rule."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         drv._client.get_filesystem_by_name.return_value = (
@@ -1166,7 +1128,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         drv._client.delete_security_policy.assert_not_called()
 
     def test_update_access_wekafs_full_sync_no_rules_deletes_policy(self):
-        """An empty rule set empties, detaches and deletes the policy."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         drv._client.get_filesystem_by_name.return_value = (
@@ -1193,7 +1154,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
             fakes.FAKE_POLICY_UID)
 
     def test_update_access_wekafs_full_sync_nothing_stale_is_noop(self):
-        """Full sync with no per-share policies touches nothing."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         drv._client.get_filesystem_by_name.return_value = (
@@ -1273,7 +1233,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         drv._client.detach_fs_security_policies.assert_not_called()
 
     def test_update_access_wekafs_prune_failure_is_tolerated(self):
-        """A failed policy-IP removal is logged, not raised."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         drv._client.get_filesystem_by_name.return_value = (
@@ -1296,7 +1255,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         drv._client.delete_security_policy.assert_not_called()
 
     def test_update_access_wekafs_ipv6_ip_rule_errors(self):
-        """An IPv6 ip rule on a WEKAFS share is rejected."""
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
             fakes.fake_filesystem())
@@ -1311,7 +1269,6 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         drv._client.create_security_policy.assert_not_called()
 
     def test_update_access_wekafs_delete_ipv6_rule_is_noop(self):
-        """Deleting an errored IPv6 rule on a WEKAFS share is a no-op."""
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
             fakes.fake_filesystem())
@@ -1476,7 +1433,6 @@ class TestWekaShareDriverManage(test.TestCase):
         self.assertEqual(20, result['size'])
 
     def test_manage_existing_wekafs_rejected(self):
-        """WEKAFS manage is unsupported under mandatory isolation."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         self.assertRaises(
@@ -1587,10 +1543,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         _wire_org(drv)
         return drv
 
-    # ------------------------------------------------------------------
-    # _remove_nfs_rule
-    # ------------------------------------------------------------------
-
     def test_remove_nfs_rule_removes_matching_permission(self):
         drv = self._make_driver()
         rule_id = 'abcdefgh-1234-5678-0000-111111111111'
@@ -1653,10 +1605,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         drv._remove_nfs_rule(fakes.FAKE_FS_NAME, rule)
         drv._client.delete_nfs_permission.assert_not_called()
 
-    # ------------------------------------------------------------------
-    # _remove_all_nfs_permissions
-    # ------------------------------------------------------------------
-
     def test_remove_all_nfs_permissions_deletes_matching(self):
         drv = self._make_driver()
         perm1 = fakes.fake_nfs_permission(
@@ -1699,12 +1647,7 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         # WekaNotFound should be swallowed, not re-raised.
         drv._remove_all_nfs_permissions(fakes.FAKE_FS_NAME)
 
-    # ------------------------------------------------------------------
-    # _apply_nfs_rule / idempotency / access-level update
-    # ------------------------------------------------------------------
-
     def test_apply_nfs_rule_returns_active_state(self):
-        """add path returns {'state':'active'} for a valid ip rule."""
         drv = self._make_driver()
         drv._client.list_client_groups.return_value = []
         drv._client.list_nfs_permissions.return_value = []
@@ -1721,7 +1664,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         drv._client.create_nfs_permission.assert_called_once()
 
     def test_apply_nfs_rule_reuses_existing_client_group(self):
-        """add path REUSES existing CG — create_client_group not called."""
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
             access_type='ip', access_to='10.2.2.2')
@@ -1744,7 +1686,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         self.assertEqual('active', result[rule['access_id']]['state'])
 
     def test_apply_nfs_rule_idempotent_existing_ip(self):
-        """Re-add skips add_client_group_rule when the IP already exists."""
         from manila.share.drivers.weka.driver import _cidr_to_weka_ip
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
@@ -1768,11 +1709,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         drv._client.add_client_group_rule.assert_not_called()
 
     def test_apply_nfs_rule_idempotent_existing_cidr(self):
-        """A CIDR rule already present is not re-added.
-
-        The cluster reports it in dotted-mask form (10.0.0.0/255.0.0.0),
-        which is what _cidr_to_weka_ip writes, so this matches directly.
-        """
         from manila.share.drivers.weka.driver import _cidr_to_weka_ip
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
@@ -1795,7 +1731,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         drv._client.add_client_group_rule.assert_not_called()
 
     def test_apply_nfs_rule_ignores_non_ip_group_rules(self):
-        """A DNS rule in the group never satisfies an ip access rule."""
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
             access_type='ip', access_to='10.5.5.5')
@@ -1818,7 +1753,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
             fakes.FAKE_CG_UID, 'IP', '10.5.5.5')
 
     def test_apply_nfs_rule_unparseable_group_rule_is_tolerated(self):
-        """A rule value the driver cannot parse just never matches."""
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
             access_type='ip', access_to='10.6.6.6')
@@ -1841,7 +1775,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
             fakes.FAKE_CG_UID, 'IP', '10.6.6.6')
 
     def test_apply_nfs_rule_access_level_change(self):
-        """access-level change: existing RO permission recreated as RW."""
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
             access_type='ip', access_to='10.4.4.4', access_level='rw')
@@ -1874,7 +1807,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         self.assertEqual('RW', kwargs.get('access_type'))
 
     def test_update_rules_path_applied_not_ignored(self):
-        """update_rules path: rule reaches 'active', not full-sync."""
         drv = self._make_driver()
         drv._client.list_client_groups.return_value = []
         drv._client.list_nfs_permissions.return_value = []
@@ -1896,7 +1828,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         drv._client.create_client_group.assert_called_once()
 
     def test_remove_nfs_rule_leak_fix_deletes_client_group(self):
-        """LEAK FIX on rule delete: permission AND client group deleted."""
         rule_id = 'abcdefgh-1234-5678-0000-222222222222'
         cg_name = 'manila-shareuui-abcdefgh'
         cg = fakes.fake_client_group(
@@ -1919,7 +1850,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
             'cg-uid-leak')
 
     def test_remove_all_nfs_permissions_leak_fix_deletes_client_groups(self):
-        """Share delete removes both permissions and client groups."""
         cg1_name = 'manila-share111-rule1111'
         cg2_name = 'manila-share222-rule2222'
         perm1 = fakes.fake_nfs_permission(
@@ -1943,7 +1873,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         drv._client.delete_client_group.assert_any_call('cg-uid-2')
 
     def test_apply_nfs_rule_tolerates_existing_ip_rule(self):
-        """Tolerate 'Rule already exists' on re-add; ro->rw still runs."""
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
             access_type='ip', access_to='2.2.2.2', access_level='rw')
@@ -1981,7 +1910,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         self.assertEqual('RW', kwargs.get('access_type'))
 
     def test_apply_nfs_rule_reraises_other_add_errors(self):
-        """Non-benign add errors (not 'already exists') are re-raised."""
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
             access_type='ip', access_to='3.3.3.3')
@@ -2004,10 +1932,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
 
         self.assertEqual('error', result[rule['access_id']]['state'])
 
-    # ------------------------------------------------------------------
-    # _get_backends
-    # ------------------------------------------------------------------
-
     def test_get_backends_returns_api_server(self):
         drv = self._make_driver()
         self.assertEqual('weka-test.example.com', drv._get_backends())
@@ -2016,10 +1940,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         drv = self._make_driver()
         drv.configuration = _make_config(weka_api_server=None)
         self.assertEqual('', drv._get_backends())
-
-    # ------------------------------------------------------------------
-    # _build_export_locations
-    # ------------------------------------------------------------------
 
     def test_build_export_locations_nfs_uses_api_server_by_default(self):
         drv = self._make_driver()
@@ -2053,10 +1973,6 @@ class TestWekaShareDriverNFSHelpers(test.TestCase):
         # WEKAFS path must use API server, not the NFS server
         self.assertIn('weka-test.example.com', result[0]['path'])
         self.assertNotIn('nfs-lb.example.com', result[0]['path'])
-
-    # ------------------------------------------------------------------
-    # _get_fs_uid_for_share
-    # ------------------------------------------------------------------
 
     def test_get_fs_uid_from_export_metadata(self):
         drv = self._make_driver()
@@ -2179,7 +2095,6 @@ class TestWekaShareDriverGetShareStatus(test.TestCase):
         self.assertEqual(constants.STATUS_ERROR, result['status'])
 
     def test_get_share_status_missing_key(self):
-        """Key absent (process restart): return error so user can retry."""
         drv = self._make_driver()
         share = fakes.fake_share()
         # _async_copies is empty — simulates process restart
@@ -2232,7 +2147,6 @@ class TestWekaShareDriverEnsureShares(test.TestCase):
             result[share['id']]['status'])
 
     def test_ensure_shares_missing_org_does_not_provision(self):
-        """A missing org is reported as error, not re-created."""
         drv = self._make_driver()
         share = fakes.fake_share()  # WEKAFS
         drv._client.list_filesystems.return_value = []
@@ -2452,7 +2366,6 @@ class TestWekaShareDriverInit(test.TestCase):
 
     @mock.patch('manila.share.drivers.weka.client.WekaApiClient')
     def test_init_via_normal_constructor(self, mock_client_cls):
-        """Construct WekaShareDriver normally to cover __init__ body."""
         # ShareDriver.__init__ requires config_opts kwarg; driver passes it.
         # We mock the parent's __init__ to avoid full Manila config machinery.
         with mock.patch(
@@ -2482,7 +2395,6 @@ class TestWekaShareDriverSetupEdgeCases(test.TestCase):
     @mock.patch('manila.share.drivers.weka.client.WekaApiClient')
     def test_do_setup_ssl_verify_defaults_to_true_when_not_set(
             self, mock_client_cls):
-        """Ssl_verify=None in config defaults to True."""
         drv = self._make_driver(weka_ssl_verify=None)
         mock_client = mock.Mock()
         mock_client.get_cluster_status.return_value = (
@@ -2499,7 +2411,6 @@ class TestWekaShareDriverSetupEdgeCases(test.TestCase):
     @mock.patch('manila.share.drivers.weka.client.WekaApiClient')
     def test_do_setup_cluster_status_failure_warns_but_continues(
             self, mock_client_cls):
-        """Get_cluster_status exception is caught, logs warn."""
         drv = self._make_driver()
         mock_client = mock.Mock()
         mock_client.get_cluster_status.side_effect = Exception('conn refused')
@@ -2511,7 +2422,6 @@ class TestWekaShareDriverSetupEdgeCases(test.TestCase):
         drv.do_setup(context=None)
 
     def test_check_for_setup_error_non_auth_exception_just_warns(self):
-        """Non-WekaAuthError from get_cluster_status is warn."""
         drv = self._make_driver()
         drv._client = mock.Mock()
         drv._client.get_cluster_status.side_effect = Exception('timeout')
@@ -2521,7 +2431,6 @@ class TestWekaShareDriverSetupEdgeCases(test.TestCase):
             drv.check_for_setup_error()
 
     def test_check_for_setup_error_wekafs_not_loaded_warns(self):
-        """Lines 322-323/326: wekafs module absent logs a warning, no raise."""
         drv = self._make_driver()
         drv._client = mock.Mock()
         drv._client.get_cluster_status.return_value = {}
@@ -2548,7 +2457,6 @@ class TestRunSnapshotCopyWorker(test.TestCase):
         return drv
 
     def test_run_snapshot_copy_nfs_sets_available_on_success(self):
-        """NFS path success sets STATUS_AVAILABLE."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='NFS')
         drv._async_copies[share['id']] = {
@@ -2569,7 +2477,6 @@ class TestRunSnapshotCopyWorker(test.TestCase):
             drv._async_copies[share['id']]['status'])
 
     def test_run_snapshot_copy_wekafs_sets_available_on_success(self):
-        """WEKAFS path success sets STATUS_AVAILABLE."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         drv._async_copies[share['id']] = {
@@ -2590,7 +2497,6 @@ class TestRunSnapshotCopyWorker(test.TestCase):
             drv._async_copies[share['id']]['status'])
 
     def test_run_snapshot_copy_sets_error_on_exception(self):
-        """Exception sets STATUS_ERROR."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         drv._async_copies[share['id']] = {
@@ -2657,7 +2563,6 @@ class TestSnapshotCopyNfsEdgeCases(test.TestCase):
     def test_umount_dst_failure_warns_and_continues(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """Umount dst failure is logged, not re-raised."""
         drv = self._make_driver()
         self._setup_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('192.0.2.1', 0)
@@ -2687,7 +2592,6 @@ class TestSnapshotCopyNfsEdgeCases(test.TestCase):
     def test_list_nfs_permissions_failure_warns(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """List_nfs_permissions exception in cleanup warns."""
         drv = self._make_driver()
         cg = fakes.fake_client_group()
         drv._client.create_client_group.return_value = cg
@@ -2717,7 +2621,6 @@ class TestSnapshotCopyNfsEdgeCases(test.TestCase):
     def test_delete_client_group_failure_warns(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """Delete_client_group failure in cleanup warns."""
         drv = self._make_driver()
         self._setup_happy_path_client(drv)
         mock_socket.return_value.getsockname.return_value = ('192.0.2.1', 0)
@@ -2743,7 +2646,6 @@ class TestSnapshotCopyNfsEdgeCases(test.TestCase):
     def test_rule_uid_none_skips_delete_rule(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """Rule_uid None skips delete_client_group_rule."""
         drv = self._make_driver()
         cg = fakes.fake_client_group()
         drv._client.create_client_group.return_value = cg
@@ -2772,7 +2674,6 @@ class TestSnapshotCopyNfsEdgeCases(test.TestCase):
     def test_socket_route_fallback_on_connect_exception(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """Socket connect failure falls back to gethostbyname."""
         drv = self._make_driver()
         cg = fakes.fake_client_group()
         drv._client.create_client_group.return_value = cg
@@ -2808,7 +2709,6 @@ class TestGetShareStatusEdgeCases(test.TestCase):
         return drv
 
     def test_get_share_status_unknown_state_returns_state(self):
-        """Unknown status is passed through as-is."""
         drv = self._make_driver()
         share = fakes.fake_share()
         drv._async_copies[share['id']] = {
@@ -2834,7 +2734,6 @@ class TestDeleteShareEdgeCases(test.TestCase):
         return drv
 
     def test_delete_share_stops_when_unmount_fails(self):
-        """Deleting under a stuck mount would wedge the share manager."""
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
             fakes.fake_filesystem())
@@ -2851,7 +2750,6 @@ class TestDeleteShareEdgeCases(test.TestCase):
         drv._client.delete_filesystem.assert_not_called()
 
     def test_delete_share_weka_not_found_swallowed(self):
-        """WekaNotFound on delete_filesystem is silenced."""
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
             fakes.fake_filesystem())
@@ -2877,7 +2775,6 @@ class TestEnsureSharesEdgeCases(test.TestCase):
         return drv
 
     def test_ensure_shares_propagates_list_failure(self):
-        """A backend that cannot be listed has not been ensured."""
         drv = self._make_driver()
         drv._client.list_filesystems.side_effect = Exception('api down')
 
@@ -2886,7 +2783,6 @@ class TestEnsureSharesEdgeCases(test.TestCase):
             None, [fakes.fake_share(proto='WEKAFS')])
 
     def test_ensure_share_nfs_falls_back_to_api_when_no_fs_by_name(self):
-        """NFS share with fs_by_name=None uses get_filesystem."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='NFS')
         fs = fakes.fake_filesystem()
@@ -2913,11 +2809,6 @@ class TestUpdateAccessEdgeCases(test.TestCase):
         return drv
 
     def test_update_access_non_nfs_protocol_uses_wekafs_path(self):
-        """A non-NFS protocol takes the WEKAFS path.
-
-        create_share rejects anything but WEKAFS/NFS, so update_access
-        never sees a third protocol; WEKAFS is the fallback branch.
-        """
         drv = self._make_driver()
         share = fakes.fake_share(proto='WEKAFS')
         rule = fakes.fake_access_rule()
@@ -2933,7 +2824,6 @@ class TestUpdateAccessEdgeCases(test.TestCase):
         self.assertEqual({}, result)
 
     def test_update_nfs_access_delete_rule_exception_warns(self):
-        """Delete rule exception is caught and warned."""
         drv = self._make_driver()
         rule = fakes.fake_access_rule()
         drv._client.list_nfs_permissions.return_value = []
@@ -2946,7 +2836,6 @@ class TestUpdateAccessEdgeCases(test.TestCase):
         self.assertEqual({}, result)
 
     def test_update_wekafs_access_user_already_exists_is_idempotent(self):
-        """Create_user 'already exists' is silenced."""
         drv = self._make_driver()
         drv._client.get_organization_by_name.return_value = (
             fakes.fake_organization())
@@ -2967,7 +2856,6 @@ class TestUpdateAccessEdgeCases(test.TestCase):
         self.assertEqual('active', result[rule['access_id']]['state'])
 
     def test_update_wekafs_access_create_user_other_error_reraises(self):
-        """Non-exists create_user error is re-raised."""
         drv = self._make_driver()
         drv._client.get_organization_by_name.return_value = (
             fakes.fake_organization())
@@ -2997,7 +2885,6 @@ class TestDeleteClientGroupByName(test.TestCase):
         return drv
 
     def test_delete_client_group_by_name_not_found_is_silent(self):
-        """WekaNotFound on delete is swallowed."""
         drv = self._make_driver()
         cg = fakes.fake_client_group()
         drv._client.list_client_groups.return_value = [cg]
@@ -3020,7 +2907,6 @@ class TestDeleteSnapshotEdgeCases(test.TestCase):
         return drv
 
     def test_delete_snapshot_weka_not_found_swallowed(self):
-        """WekaNotFound on delete_snapshot is silent."""
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
             fakes.fake_filesystem())
@@ -3046,7 +2932,6 @@ class TestManageExistingEdgeCases(test.TestCase):
         return drv
 
     def test_manage_existing_no_export_locations_raises(self):
-        """Empty export_locations raises ManageInvalidShare."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='NFS', export_locations=[])
 
@@ -3069,7 +2954,6 @@ class TestShareNameFromShare(test.TestCase):
         return drv
 
     def test_share_name_from_share_delegates_to_share_name(self):
-        """_share_name_from_share simply delegates."""
         drv = self._make_driver()
         share = fakes.fake_share()
         result = drv._share_name_from_share(share)
@@ -3088,7 +2972,6 @@ class TestDerivePasswordEdgeCases(test.TestCase):
         return drv
 
     def test_derive_password_raises_when_secret_is_none(self):
-        """Missing secret raises WekaConfigurationError."""
         drv = self._make_driver()
         drv._org_admin_secret = None
 
@@ -3109,7 +2992,6 @@ class TestEnsureOrgEdgeCases(test.TestCase):
         return drv
 
     def test_ensure_org_create_conflict_is_idempotent(self):
-        """WekaApiError 'already exists' is swallowed."""
         drv = self._make_driver()
         drv._client.get_organization_by_name.return_value = None
         drv._client.create_organization.side_effect = weka_exc.WekaApiError(
@@ -3120,7 +3002,6 @@ class TestEnsureOrgEdgeCases(test.TestCase):
         self.assertIn('proj', org_name)
 
     def test_ensure_org_create_other_error_raises_weka_org_error(self):
-        """Non-conflict create error raises WekaOrgError."""
         drv = self._make_driver()
         drv._client.get_organization_by_name.return_value = None
         drv._client.create_organization.side_effect = weka_exc.WekaApiError(
@@ -3143,7 +3024,6 @@ class TestOrgTokenFileEdgeCases(test.TestCase):
         return drv
 
     def test_org_token_file_oschmod_failure_is_ignored(self):
-        """Os.chmod failure on existing dir is ignored."""
         drv = self._make_driver()
         tmpdir = tempfile.mkdtemp(prefix='weka-tok-test-')
         drv._auth_token_dir = tmpdir
@@ -3164,7 +3044,6 @@ class TestOrgTokenFileEdgeCases(test.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_org_token_file_write_failure_cleans_up_tmp_and_raises(self):
-        """Write failure removes tmp file and raises."""
         drv = self._make_driver()
         tmpdir = tempfile.mkdtemp(prefix='weka-tok-test-')
         drv._auth_token_dir = tmpdir
@@ -3182,7 +3061,6 @@ class TestOrgTokenFileEdgeCases(test.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_org_token_file_makedirs_oserror_raises_weka_mount_error(self):
-        """OSError from makedirs raises WekaMountError."""
         drv = self._make_driver()
         drv._auth_token_dir = '/tmp/weka-tok-test'
         drv._client.get_organization_by_name.return_value = (
@@ -3212,7 +3090,6 @@ class TestGetFsUidForShareEdgeCases(test.TestCase):
         return drv
 
     def test_get_fs_uid_from_orm_metadata_object(self):
-        """Metadata as ORM-like object with .items()."""
         drv = self._make_driver()
 
         class FakeMeta:
@@ -3237,7 +3114,6 @@ class TestGetFsUidForShareEdgeCases(test.TestCase):
         drv._client.get_filesystem_by_name.assert_not_called()
 
     def test_get_fs_uid_managed_share_custom_fs_name(self):
-        """Managed share with NFS path falls back to name."""
         drv = self._make_driver()
         # Managed share: filesystem name not manila_* but 'my-existing-fs'.
         custom_name = 'my-existing-fs'
@@ -3262,7 +3138,6 @@ class TestGetFsUidForShareEdgeCases(test.TestCase):
         self.assertEqual(fakes.FAKE_FS_UID, uid)
 
     def test_get_fs_uid_nfs_colon_path_stripped(self):
-        """'server:/fs_name' stripped correctly."""
         drv = self._make_driver()
         custom_fs = fakes.fake_filesystem(name='the-fs')
         drv._client.get_filesystem_by_name.side_effect = (
@@ -3296,7 +3171,6 @@ class TestCreateFilesystemIdempotentEdgeCases(test.TestCase):
         return drv
 
     def test_create_filesystem_conflict_race_returns_existing(self):
-        """WekaConflict -> get again, return existing."""
         drv = self._make_driver()
         fs = fakes.fake_filesystem()
         drv._client.get_filesystem_by_name.side_effect = [None, fs]
@@ -3309,7 +3183,6 @@ class TestCreateFilesystemIdempotentEdgeCases(test.TestCase):
         self.assertEqual(fs['uid'], result['uid'])
 
     def test_create_filesystem_conflict_race_reraises_if_still_missing(self):
-        """WekaConflict + still-None re-raises."""
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = None
         drv._client.create_filesystem.side_effect = (
@@ -3325,36 +3198,30 @@ class TestIsAlreadyExistsError(test.TestCase):
     """Cover _is_already_exists_error."""
 
     def test_weka_conflict_returns_true(self):
-        """WekaConflict always returns True."""
         exc = weka_exc.WekaConflict(reason='conflict')
         self.assertTrue(weka_driver._is_already_exists_error(exc))
 
     def test_non_api_error_returns_false(self):
-        """A non-WekaApiError is never an 'already exists' condition."""
         exc = Exception('Rule already exists in group')
         self.assertFalse(weka_driver._is_already_exists_error(exc))
 
     def test_already_exist_string_400_returns_true(self):
-        """400 with 'already exist' substring returns True."""
         exc = weka_exc.WekaApiError(
             status_code=400, reason='Rule already exists in group')
         self.assertTrue(weka_driver._is_already_exists_error(exc))
 
     def test_already_in_use_string_400_returns_true(self):
-        """400 with 'already in use' (duplicate user) returns True."""
         exc = weka_exc.WekaApiError(
             status_code=400,
             reason='Could not create user: Username already in use.')
         self.assertTrue(weka_driver._is_already_exists_error(exc))
 
     def test_matching_phrase_wrong_status_returns_false(self):
-        """The phrase is ignored outside the 400/409 status codes."""
         exc = weka_exc.WekaApiError(
             status_code=500, reason='backend already exists failure')
         self.assertFalse(weka_driver._is_already_exists_error(exc))
 
     def test_other_error_returns_false(self):
-        """A 400 with an unrelated message returns False."""
         exc = weka_exc.WekaApiError(
             status_code=400, reason='permission denied')
         self.assertFalse(weka_driver._is_already_exists_error(exc))
@@ -3371,7 +3238,6 @@ class TestCheckForSetupErrorIOError(test.TestCase):
         return drv
 
     def test_ioerror_reading_proc_fs_silenced_warns_about_wekafs(self):
-        """IOError opening /proc/filesystems is caught."""
         drv = self._make_driver()
         drv._client.get_cluster_status.return_value = {}
         with mock.patch('builtins.open',
@@ -3395,7 +3261,6 @@ class TestCopySnapshotNfsNfsServerGuard(test.TestCase):
         return drv
 
     def test_copy_snapshot_nfs_raises_when_no_nfs_server(self):
-        """_copy_snapshot_nfs guard raises ManilaException."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='NFS',
                                  share_id=fakes.FAKE_NEW_SHARE_ID)
@@ -3437,7 +3302,6 @@ class TestCopySnapshotNfsCleanupBranches(test.TestCase):
     def test_rmdir_exception_swallowed_on_success(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """Os.rmdir exception is swallowed."""
         drv = self._make_driver()
         cg = fakes.fake_client_group()
         drv._client.create_client_group.return_value = cg
@@ -3465,7 +3329,6 @@ class TestCopySnapshotNfsCleanupBranches(test.TestCase):
     def test_delete_cg_rule_exception_swallowed(
             self, mock_nfs_mount, mock_umount, mock_rsync,
             mock_mkdtemp, mock_rmdir, mock_socket, mock_sleep):
-        """Delete_client_group_rule exception is swallowed."""
         drv = self._make_driver()
         cg = fakes.fake_client_group()
         drv._client.create_client_group.return_value = cg
@@ -3499,7 +3362,6 @@ class TestUpdateNfsAccessDeleteRuleWarning(test.TestCase):
         return drv
 
     def test_delete_rule_exception_is_a_warning_not_an_error(self):
-        """Delete rule exception emits a warning, no raise."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule()
@@ -3523,7 +3385,6 @@ class TestApplyNfsRuleInvalidIp(test.TestCase):
         return drv
 
     def test_apply_nfs_rule_invalid_ip_raises_invalid_share_access(self):
-        """Non-IPv4 access_to raises InvalidShareAccess."""
         drv = self._make_driver()
         share = fakes.fake_share(proto='NFS')
         rule = fakes.fake_access_rule(
@@ -3549,7 +3410,6 @@ class TestOrgTokenFileUnlinkFailure(test.TestCase):
 
     def test_org_token_file_unlink_oserror_swallowed_reraises_write_error(
             self):
-        """Unlink OSError swallowed; write OSError raised."""
         drv = self._make_driver()
         tmpdir = tempfile.mkdtemp(prefix='weka-tok-test-')
         drv._auth_token_dir = tmpdir
@@ -3602,7 +3462,6 @@ class TestGetFsUidOrmAndPathEdgeCases(test.TestCase):
         return drv
 
     def test_get_fs_uid_orm_meta_attribute_error_skipped(self):
-        """AttributeError in meta.items() is skipped."""
         drv = self._make_driver()
 
         class BadMeta:
@@ -3631,7 +3490,6 @@ class TestGetFsUidOrmAndPathEdgeCases(test.TestCase):
         self.assertEqual(fakes.FAKE_FS_UID, uid)
 
     def test_get_fs_uid_path_no_slash_with_colon_stripped(self):
-        """Path without / but with : is stripped correctly."""
         drv = self._make_driver()
         custom_fs = fakes.fake_filesystem(name='the-fs')
         # First call: standard name miss; second call: custom name hit.
@@ -3654,7 +3512,6 @@ class TestGetFsUidOrmAndPathEdgeCases(test.TestCase):
         self.assertEqual(fakes.FAKE_FS_UID, uid)
 
     def test_get_fs_uid_orm_loc_attribute_error_on_path(self):
-        """TypeError on loc.path property is caught."""
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = None
 
@@ -3702,8 +3559,6 @@ class TestWekaShareDriverSecurityPolicies(test.TestCase):
     def _ip_rule(self, ip='10.0.0.1', level='rw'):
         return fakes.fake_access_rule(
             access_type='ip', access_to=ip, access_level=level)
-
-    # -- Model A: apply --------------------------------------------------
 
     def test_apply_ip_rule_adds_to_existing_policy(self):
         drv = self._make_driver()
@@ -3833,8 +3688,6 @@ class TestWekaShareDriverSecurityPolicies(test.TestCase):
             None, fakes.fake_share(proto='WEKAFS'), [], [rule], [], [])
         self.assertEqual('error', result[rule['access_id']]['state'])
 
-    # -- Model A: delete -------------------------------------------------
-
     def test_delete_ip_rule_empties_and_deletes_policies(self):
         drv = self._make_driver()
         org = self._org_client(drv)
@@ -3894,11 +3747,6 @@ class TestWekaShareDriverSecurityPolicies(test.TestCase):
         org.get_security_policy_by_name.assert_not_called()
 
     def test_delete_ipv6_ip_rule_is_noop(self):
-        """Removing an IPv6 ip rule makes no Weka policy calls.
-
-        IPv6 rules are rejected at add-time, so no policy was ever
-        created for them.  The delete path must silently no-op.
-        """
         drv = self._make_driver()
         org = self._org_client(drv)
         org.get_filesystem_by_name.return_value = fakes.fake_filesystem()
@@ -3909,8 +3757,6 @@ class TestWekaShareDriverSecurityPolicies(test.TestCase):
             None, fakes.fake_share(proto='WEKAFS'), [], [], [rule])
         org.get_security_policy_by_name.assert_not_called()
         org.delete_security_policy.assert_not_called()
-
-    # -- Model B: named policy groups ------------------------------------
 
     def test_update_access_group_share_is_noop_active(self):
         drv = self._make_driver()
@@ -3987,8 +3833,6 @@ class TestWekaShareDriverSecurityPolicies(test.TestCase):
         org.create_security_policy.assert_not_called()
         org.attach_fs_security_policies.assert_not_called()
 
-    # -- _parse_policy_groups -------------------------------------------
-
     def test_parse_policy_groups_valid(self):
         g = weka_driver.WekaShareDriver._parse_policy_groups(
             'team-a:rw:10.0.1.0/24,10.0.2.0/24; team-a:ro:10.0.9.0/24; '
@@ -4014,8 +3858,6 @@ class TestWekaShareDriverSecurityPolicies(test.TestCase):
         self.assertEqual(
             {}, weka_driver.WekaShareDriver._parse_policy_groups(''))
 
-    # -- _share_policy_group --------------------------------------------
-
     def test_share_policy_group_no_type_id(self):
         drv = self._make_driver()
         self.assertIsNone(
@@ -4037,8 +3879,6 @@ class TestWekaShareDriverSecurityPolicies(test.TestCase):
         with mock.patch(_SPEC_PATCH, return_value={}):
             self.assertIsNone(
                 drv._share_policy_group({'id': 's', 'share_type_id': 't'}))
-
-    # -- delete_share policy cleanup ------------------------------------
 
     def _delete_share(self, drv):
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
@@ -4128,8 +3968,6 @@ class TestWekaShareDriverSecurityPolicies(test.TestCase):
             self._delete_share(drv)  # outer try/except swallows it
 
         org.delete_filesystem.assert_called_once()
-
-    # -- error / tolerance branches -------------------------------------
 
     def test_apply_ip_rule_add_ip_other_error_sets_error(self):
         drv = self._make_driver()
@@ -4253,8 +4091,6 @@ class TestWekaShareDriverSecurityPolicies(test.TestCase):
         self._delete_share(drv)  # detach error tolerated, delete proceeds
         self.assertEqual(2, org.delete_security_policy.call_count)
 
-    # -- _policy_ip (security-policy IP normalization) ------------------
-
     def test_policy_ip_normalization(self):
         self.assertEqual(
             '10.0.1.0/24', weka_driver._policy_ip('10.0.1.0/24'))
@@ -4283,8 +4119,6 @@ class TestWekaShareDriverSecurityPolicies(test.TestCase):
 
         _, kwargs = org.create_security_policy.call_args
         self.assertEqual(['10.0.1.0/24'], kwargs['ips'])
-
-    # -- already-attached (500) tolerance ------------------------------
 
     def test_is_already_attached_error(self):
         self.assertTrue(weka_driver._is_already_attached_error(

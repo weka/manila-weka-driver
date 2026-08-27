@@ -96,10 +96,6 @@ class WekaApiClient(object):
         self._session.mount('https://', adapter)
         self._session.mount('http://', adapter)
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _url(self, path):
         """Return a full URL for the given API path."""
         return self._base_url + path
@@ -218,10 +214,6 @@ class WekaApiClient(object):
             except Exception:
                 pass
         return {}
-
-    # ------------------------------------------------------------------
-    # Authentication
-    # ------------------------------------------------------------------
 
     def login(self):
         """Obtain and store a new token pair (thread-safe)."""
@@ -351,15 +343,9 @@ class WekaApiClient(object):
         }
 
     def get_cluster_status(self):
-        """Return cluster name, version and health (GET /cluster)."""
         return self._get('/cluster')
 
-    # ------------------------------------------------------------------
-    # Organization / user methods (per-tenant WEKAFS isolation)
-    # ------------------------------------------------------------------
-
     def list_organizations(self):
-        """Return all organizations (GET /organizations)."""
         result = self._get('/organizations')
         return result.get('data', result)
 
@@ -394,7 +380,6 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def delete_organization(self, org_uid):
-        """Delete an org and all its users (DELETE /organizations)."""
         return self._delete(
             '/organizations/{uid}'.format(uid=org_uid))
 
@@ -412,17 +397,11 @@ class WekaApiClient(object):
         result = self._post('/users', json=payload)
         return result.get('data', result)
 
-    # ------------------------------------------------------------------
-    # Filesystem methods
-    # ------------------------------------------------------------------
-
     def list_filesystems(self):
-        """Return all filesystems (GET /fileSystems)."""
         result = self._get('/fileSystems')
         return result.get('data', result)
 
     def get_filesystem(self, fs_uid):
-        """Return one filesystem's metadata (GET /fileSystems/{uid})."""
         result = self._get('/fileSystems/{uid}'.format(uid=fs_uid))
         return result.get('data', result)
 
@@ -440,7 +419,6 @@ class WekaApiClient(object):
                           auth_required=False,
                           allow_no_space=False,
                           data_reduction=None):
-        """Create a filesystem (POST /fileSystems); capacities in bytes."""
         payload = {
             'name': name,
             'group_name': group_name,
@@ -460,7 +438,6 @@ class WekaApiClient(object):
     def update_filesystem(self, fs_uid, name=None, total_capacity=None,
                           ssd_capacity=None, auth_required=None,
                           allow_no_space=None, data_reduction=None):
-        """Update a filesystem's settings (PUT /fileSystems/{uid})."""
         payload = {}
         if name is not None:
             payload['name'] = name
@@ -477,24 +454,17 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def delete_filesystem(self, fs_uid, purge_from_obs=False):
-        """Delete a filesystem (DELETE /fileSystems/{uid})."""
         params = {}
         if purge_from_obs:
             params['purge_from_obs'] = True
         return self._delete(
             '/fileSystems/{uid}'.format(uid=fs_uid), params=params or None)
 
-    # ------------------------------------------------------------------
-    # Filesystem group methods
-    # ------------------------------------------------------------------
-
     def list_filesystem_groups(self):
-        """Return all filesystem groups (GET /fileSystemGroups)."""
         result = self._get('/fileSystemGroups')
         return result.get('data', result)
 
     def get_filesystem_group(self, group_uid):
-        """Return one filesystem group (GET /fileSystemGroups/{uid})."""
         result = self._get(
             '/fileSystemGroups/{uid}'.format(uid=group_uid))
         return result.get('data', result)
@@ -508,7 +478,6 @@ class WekaApiClient(object):
 
     def create_filesystem_group(self, name, target_ssd_retention=None,
                                 start_demote=None):
-        """Create a filesystem group (POST /fileSystemGroups)."""
         payload = {'name': name}
         if target_ssd_retention is not None:
             payload['target_ssd_retention'] = target_ssd_retention
@@ -517,12 +486,7 @@ class WekaApiClient(object):
         result = self._post('/fileSystemGroups', json=payload)
         return result.get('data', result)
 
-    # ------------------------------------------------------------------
-    # NFS methods
-    # ------------------------------------------------------------------
-
     def list_nfs_permissions(self):
-        """Return all NFS export permissions (GET /nfs/permissions)."""
         result = self._get('/nfs/permissions')
         return result.get('data', result)
 
@@ -551,17 +515,14 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def delete_nfs_permission(self, permission_uid):
-        """Delete an NFS export permission (DELETE /nfs/permissions)."""
         return self._delete(
             '/nfs/permissions/{uid}'.format(uid=permission_uid))
 
     def list_client_groups(self):
-        """Return all NFS client groups (GET /nfs/clientGroups)."""
         result = self._get('/nfs/clientGroups')
         return result.get('data', result)
 
     def create_client_group(self, name):
-        """Create an NFS client group (POST /nfs/clientGroups)."""
         payload = {'name': name}
         result = self._post('/nfs/clientGroups', json=payload)
         return result.get('data', result)
@@ -582,13 +543,11 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def get_client_group(self, group_uid):
-        """Return one NFS client group (GET /nfs/clientGroups/{uid})."""
         result = self._get(
             '/nfs/clientGroups/{uid}'.format(uid=group_uid))
         return result.get('data', result)
 
     def delete_client_group_rule(self, group_uid, rule_uid):
-        """Delete one rule from a client group (DELETE .../rules)."""
         return self._delete(
             '/nfs/clientGroups/{uid}/rules/{rule_uid}'.format(
                 uid=group_uid, rule_uid=rule_uid))
@@ -612,17 +571,12 @@ class WekaApiClient(object):
         return self._delete(
             '/nfs/clientGroups/{uid}'.format(uid=group_uid))
 
-    # ------------------------------------------------------------------
-    # Security policy methods (WEKAFS per-share IP access control)
-    # ------------------------------------------------------------------
-    #
     # CIDR Allow/Deny rules attached to a filesystem and enforced at
     # native mount time: once any policy is attached, an unmatched source
     # IP is denied, and read_only forces a read-only mount.  Policies are
     # organization-owned, so call these on an org-scoped client.
 
     def list_security_policies(self):
-        """Return the org's security policies (GET /security/policies)."""
         result = self._get('/security/policies')
         return result.get('data', result)
 
@@ -635,7 +589,6 @@ class WekaApiClient(object):
 
     def create_security_policy(self, name, ips, action='Allow',
                                read_only=False):
-        """Create a CIDR security policy (POST /security/policies)."""
         payload = {
             'name': name,
             'action': action,
@@ -664,33 +617,25 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def delete_security_policy(self, policy_uid):
-        """Delete a security policy (DELETE /security/policies/{uid})."""
         return self._delete(
             '/security/policies/{uid}'.format(uid=policy_uid))
 
     def get_fs_security_policies(self, fs_uid):
-        """Policies attached to a filesystem (GET .../securityPolicy)."""
         result = self._get(
             '/fileSystems/{uid}/securityPolicy'.format(uid=fs_uid))
         return result.get('data', result)
 
     def attach_fs_security_policies(self, fs_uid, policy_uids):
-        """Attach security policies to a filesystem (POST .../attach)."""
         result = self._post(
             '/fileSystems/{uid}/securityPolicy/attach'.format(uid=fs_uid),
             json={'policies': list(policy_uids)})
         return result.get('data', result)
 
     def detach_fs_security_policies(self, fs_uid, policy_uids):
-        """Detach security policies from a filesystem (POST .../detach)."""
         result = self._post(
             '/fileSystems/{uid}/securityPolicy/detach'.format(uid=fs_uid),
             json={'policies': list(policy_uids)})
         return result.get('data', result)
-
-    # ------------------------------------------------------------------
-    # Snapshot methods
-    # ------------------------------------------------------------------
 
     def list_snapshots(self, fs_uid=None):
         """Return all snapshots; any fs_uid filter is applied locally."""
@@ -702,7 +647,6 @@ class WekaApiClient(object):
         return snaps
 
     def get_snapshot(self, snap_uid):
-        """Return one snapshot (GET /snapshots/{uid})."""
         result = self._get('/snapshots/{uid}'.format(uid=snap_uid))
         return result.get('data', result)
 
@@ -714,7 +658,6 @@ class WekaApiClient(object):
         return None
 
     def create_snapshot(self, fs_uid, name, is_writable=False):
-        """Create a snapshot (POST /snapshots)."""
         payload = {
             'fs_uid': fs_uid,
             'name': name,
@@ -724,7 +667,6 @@ class WekaApiClient(object):
         return result.get('data', result)
 
     def delete_snapshot(self, snap_uid):
-        """Delete a snapshot (DELETE /snapshots/{uid})."""
         return self._delete('/snapshots/{uid}'.format(uid=snap_uid))
 
     def restore_snapshot(self, snap_uid, fs_uid):
@@ -733,10 +675,6 @@ class WekaApiClient(object):
             '/snapshots/{fs_uid}/{uid}/restore'.format(
                 fs_uid=fs_uid, uid=snap_uid))
         return result.get('data', result)
-
-    # ------------------------------------------------------------------
-    # Cluster capacity / health
-    # ------------------------------------------------------------------
 
     def get_capacity(self):
         """Return {totalBytes, usedBytes} for the cluster.
