@@ -139,12 +139,12 @@ weka_opts = [
     ),
 
     # --- WEKAFS per-share access (security policies) ---
-    # Model B: a share type setting the "weka:security_policy_group"
+    # A share type setting the "weka:security_policy_group"
     # extra spec gets the group's Allow policies attached at creation, so
     # only the listed CIDRs may mount it.  One policy object serves every
     # share of the type, keeping a group within the org's policy budget.
     # Without the extra spec a share uses per-share policies driven by
-    # its own access rules (Model A).
+    # its own access rules.
     cfg.StrOpt(
         'weka_security_policy_group',
         default=None,

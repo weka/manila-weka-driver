@@ -1,4 +1,4 @@
-# Copyright 2024 Weka.IO Ltd.
+# Copyright 2026 Weka.IO Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -14,14 +14,14 @@
 
 """Unit tests for manila.share.drivers.weka.utils."""
 
-import unittest
 from unittest import mock
 
 from manila.share.drivers.weka import exceptions as weka_exc
 from manila.share.drivers.weka import utils
+from manila import test
 
 
-class TestUnitConversion(unittest.TestCase):
+class TestUnitConversion(test.TestCase):
 
     def test_gb_to_bytes(self):
         self.assertEqual(1073741824, utils.gb_to_bytes(1))
@@ -42,7 +42,7 @@ class TestUnitConversion(unittest.TestCase):
             )
 
 
-class TestSanitizeLogParams(unittest.TestCase):
+class TestSanitizeLogParams(test.TestCase):
 
     def test_hides_password(self):
         params = {'username': 'admin', 'password': 'secret'}
@@ -69,7 +69,7 @@ class TestSanitizeLogParams(unittest.TestCase):
         self.assertEqual({}, utils.sanitize_log_params({}))
 
 
-class TestRetryOnTransient(unittest.TestCase):
+class TestRetryOnTransient(test.TestCase):
 
     def test_succeeds_on_first_try(self):
         func = mock.Mock(return_value='ok')
@@ -123,7 +123,3 @@ class TestRetryOnTransient(unittest.TestCase):
             pass
         decorated = utils.retry_on_transient()(my_func)
         self.assertEqual('my_func', decorated.__name__)
-
-
-if __name__ == '__main__':
-    unittest.main()

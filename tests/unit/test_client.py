@@ -1,4 +1,4 @@
-# Copyright 2024 Weka.IO Ltd.
+# Copyright 2026 Weka.IO Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -14,13 +14,13 @@
 
 """Unit tests for manila.share.drivers.weka.client."""
 
-import unittest
 from unittest import mock
 
 import requests
 
 from manila.share.drivers.weka import client as weka_client
 from manila.share.drivers.weka import exceptions as weka_exc
+from manila import test
 from tests.unit import fakes
 
 
@@ -44,7 +44,7 @@ def _login_response():
     })
 
 
-class TestWekaApiClientAuth(unittest.TestCase):
+class TestWekaApiClientAuth(test.TestCase):
 
     def _make_client(self):
         c = weka_client.WekaApiClient(
@@ -303,7 +303,7 @@ class TestWekaApiClientAuth(unittest.TestCase):
         self.assertEqual(1, req_mock.call_count)
 
 
-class TestWekaApiClientFilesystems(unittest.TestCase):
+class TestWekaApiClientFilesystems(test.TestCase):
 
     def setUp(self):
         self.client = weka_client.WekaApiClient(
@@ -393,7 +393,7 @@ class TestWekaApiClientFilesystems(unittest.TestCase):
         self.assertIsNone(result)
 
 
-class TestWekaApiClientFilesystemGroups(unittest.TestCase):
+class TestWekaApiClientFilesystemGroups(test.TestCase):
 
     def setUp(self):
         self.client = weka_client.WekaApiClient(
@@ -433,7 +433,7 @@ class TestWekaApiClientFilesystemGroups(unittest.TestCase):
         self.assertIsNone(result)
 
 
-class TestWekaApiClientSnapshots(unittest.TestCase):
+class TestWekaApiClientSnapshots(test.TestCase):
 
     def setUp(self):
         self.client = weka_client.WekaApiClient(
@@ -516,7 +516,7 @@ class TestWekaApiClientSnapshots(unittest.TestCase):
         self.assertIsNone(result)
 
 
-class TestWekaApiClientNFS(unittest.TestCase):
+class TestWekaApiClientNFS(test.TestCase):
 
     def setUp(self):
         self.client = weka_client.WekaApiClient(
@@ -583,7 +583,7 @@ class TestWekaApiClientNFS(unittest.TestCase):
                 fakes.FAKE_CG_UID, 'DNS', '*.example.com')
 
 
-class TestWekaApiClientSecurityPolicies(unittest.TestCase):
+class TestWekaApiClientSecurityPolicies(test.TestCase):
 
     def setUp(self):
         self.client = weka_client.WekaApiClient(
@@ -704,7 +704,7 @@ class TestWekaApiClientSecurityPolicies(unittest.TestCase):
             {'policies': [fakes.FAKE_POLICY_UID]}, cap['json'])
 
 
-class TestWekaApiClientCapacity(unittest.TestCase):
+class TestWekaApiClientCapacity(test.TestCase):
 
     def setUp(self):
         self.client = weka_client.WekaApiClient(
@@ -729,7 +729,7 @@ class TestWekaApiClientCapacity(unittest.TestCase):
         self.assertEqual(status, result)
 
 
-class TestWekaApiClientSDKStubs(unittest.TestCase):
+class TestWekaApiClientSDKStubs(test.TestCase):
     """Smoke tests for NFS client group methods."""
 
     def setUp(self):
@@ -768,7 +768,7 @@ class TestWekaApiClientSDKStubs(unittest.TestCase):
             self.client.delete_client_group('cg-1')
 
 
-class TestWekaApiClientOrganizations(unittest.TestCase):
+class TestWekaApiClientOrganizations(test.TestCase):
 
     def setUp(self):
         self.client = weka_client.WekaApiClient(
@@ -861,7 +861,7 @@ class TestWekaApiClientOrganizations(unittest.TestCase):
         login.assert_called_once()
 
 
-class TestWekaApiClientRetry(unittest.TestCase):
+class TestWekaApiClientRetry(test.TestCase):
     """Test retry/backoff paths in _request."""
 
     def setUp(self):
@@ -893,7 +893,7 @@ class TestWekaApiClientRetry(unittest.TestCase):
                     self.client._request, 'GET', '/fileSystems')
 
 
-class TestWekaApiClientDelete(unittest.TestCase):
+class TestWekaApiClientDelete(test.TestCase):
     """Test _delete helper branches."""
 
     def setUp(self):
@@ -933,7 +933,7 @@ class TestWekaApiClientDelete(unittest.TestCase):
         self.assertEqual({}, result)
 
 
-class TestWekaApiClientPatch(unittest.TestCase):
+class TestWekaApiClientPatch(test.TestCase):
     """Test _patch helper."""
 
     def setUp(self):
@@ -956,7 +956,7 @@ class TestWekaApiClientPatch(unittest.TestCase):
         self.assertEqual({'ok': True}, result.get('data'))
 
 
-class TestWekaApiClientRefreshFallback(unittest.TestCase):
+class TestWekaApiClientRefreshFallback(test.TestCase):
     """Test _refresh_or_login exception fallback branch."""
 
     def setUp(self):
@@ -976,7 +976,7 @@ class TestWekaApiClientRefreshFallback(unittest.TestCase):
         do_login.assert_called_once()
 
 
-class TestCreateOrganizationOptionalKwargs(unittest.TestCase):
+class TestCreateOrganizationOptionalKwargs(test.TestCase):
     """Test optional quota params in create_organization."""
 
     def setUp(self):
@@ -1016,7 +1016,7 @@ class TestCreateOrganizationOptionalKwargs(unittest.TestCase):
         self.assertNotIn('ssd_quota', captured['json'])
 
 
-class TestCreateFilesystemOptionalKwargs(unittest.TestCase):
+class TestCreateFilesystemOptionalKwargs(test.TestCase):
     """Test optional params in create_filesystem."""
 
     def setUp(self):
@@ -1063,7 +1063,7 @@ class TestCreateFilesystemOptionalKwargs(unittest.TestCase):
         self.assertTrue(captured['json']['data_reduction'])
 
 
-class TestUpdateFilesystemOptionalKwargs(unittest.TestCase):
+class TestUpdateFilesystemOptionalKwargs(test.TestCase):
     """Test optional params in update_filesystem."""
 
     def setUp(self):
@@ -1111,7 +1111,7 @@ class TestUpdateFilesystemOptionalKwargs(unittest.TestCase):
         self.assertFalse(captured['json']['data_reduction'])
 
 
-class TestGetFilesystemGroup(unittest.TestCase):
+class TestGetFilesystemGroup(test.TestCase):
     """Test get_filesystem_group."""
 
     def setUp(self):
@@ -1130,7 +1130,7 @@ class TestGetFilesystemGroup(unittest.TestCase):
         self.assertEqual(grp, result)
 
 
-class TestCreateFilesystemGroupOptionalKwargs(unittest.TestCase):
+class TestCreateFilesystemGroupOptionalKwargs(test.TestCase):
     """Test optional params in create_filesystem_group."""
 
     def setUp(self):
@@ -1165,7 +1165,7 @@ class TestCreateFilesystemGroupOptionalKwargs(unittest.TestCase):
         self.assertEqual(10, captured['json']['start_demote'])
 
 
-class TestCreateNfsPermissionOptionalKwargs(unittest.TestCase):
+class TestCreateNfsPermissionOptionalKwargs(test.TestCase):
     """Test optional params in create_nfs_permission."""
 
     def setUp(self):
@@ -1209,7 +1209,7 @@ class TestCreateNfsPermissionOptionalKwargs(unittest.TestCase):
         self.assertEqual(65534, captured['json']['anon_gid'])
 
 
-class TestDeleteClientGroup(unittest.TestCase):
+class TestDeleteClientGroup(test.TestCase):
     """Test delete_client_group error-handling paths."""
 
     def setUp(self):
@@ -1271,7 +1271,7 @@ class TestDeleteClientGroup(unittest.TestCase):
         self.assertEqual({}, result)
 
 
-class TestGetCapacityFallback(unittest.TestCase):
+class TestGetCapacityFallback(test.TestCase):
     """Test get_capacity /drives fallback for Weka 5.x."""
 
     def setUp(self):
@@ -1314,7 +1314,3 @@ class TestGetCapacityFallback(unittest.TestCase):
                                side_effect=_get_side_effect):
             result = self.client.get_capacity()
         self.assertEqual({}, result)
-
-
-if __name__ == '__main__':
-    unittest.main()

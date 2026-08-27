@@ -1,4 +1,4 @@
-# Copyright 2024 Weka.IO Ltd.
+# Copyright 2026 Weka.IO Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -141,15 +141,7 @@ FAKE_POLICY_UID = 'pol-uid-eeee'
 
 def fake_security_policy(uid=FAKE_POLICY_UID, name='manila-shareuui-rw',
                          ips=None, action='Allow', read_only=False):
-    """A Weka security policy as returned by the v2 REST API.
-
-    NOTE the key is ``ips``, not ``ip``.  Writes take ``ip`` (create) and
-    ``add_ip``/``remove_ip`` (update), but a policy read back reports its
-    addresses under ``ips``.  This fixture previously used ``ip``, which
-    matched the driver's own wrong assumption -- so the suite stayed
-    green at 100% coverage while the driver read None on a live cluster
-    and never pruned or removed anything.
-    """
+    """A security policy as read back from the API, keyed on ``ips``."""
     return {
         'uid': uid,
         'name': name,
@@ -216,11 +208,7 @@ FAKE_SHARE_ID = 'share-uuid-1234'
 FAKE_SNAPSHOT_ID = 'snapshot-uuid-0001'
 FAKE_PROJECT_ID = 'proj-uuid-5678'
 
-# Used in create_share_from_snapshot tests — the *new* share being created
-# (distinct from the snapshot's parent share so names don't collide).
-# FAKE_NEW_FS_NAME must match _share_name('new-share-uuid-9999'):
-#   'manila_' + 'new-share-uuid-9999'.replace('-','')
-#   => 'manila_newshareuuid9999'
+# The new share created from a snapshot, distinct from its parent.
 FAKE_NEW_SHARE_ID = 'new-share-uuid-9999'
 FAKE_NEW_FS_UID = 'new-fs-uid-9999'
 FAKE_NEW_FS_NAME = 'manila_newshareuuid9999'

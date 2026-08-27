@@ -12,11 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Manila share driver for Weka storage.
-
-Architecture, configuration reference and known limitations are in
-doc/source/admin/weka_share_driver.rst.
-"""
+"""Manila share driver for Weka storage."""
 
 import hashlib
 import hmac
@@ -79,7 +75,6 @@ def _policy_ip(access_to):
     """Normalize access_to for a policy: CIDR prefix, not a mask."""
     if '/' in access_to:
         return str(ipaddress.IPv4Network(access_to, strict=False))
-    ipaddress.IPv4Address(access_to)
     return access_to
 
 
@@ -90,7 +85,7 @@ def _is_already_attached_error(exc):
     """
     if not isinstance(exc, weka_exc.WekaApiError):
         return False
-    return 'already present in the list' in str(exc).lower()
+    return 'already present' in str(exc).lower()
 
 
 def _is_already_exists_error(exc):
@@ -128,13 +123,12 @@ def _nfs_mount_with_retry(export, mount_path):
 
 
 class WekaShareDriver(driver.ShareDriver):
-    """Manila share driver for Weka storage.
-
-    Serverless (driver_handles_share_servers = False): Weka manages its
-    own networking, so there is no Nova/Neutron integration.
-    """
+    """Manila share driver for Weka storage."""
 
     _is_driver_handles_share_servers = False
+    # Weka access rules are IPv4-only; manila filters IPv6 rules out for
+    # backends that declare this.
+    ipv6_implemented = False
 
     # Per-tenant WEKAFS isolation, overridden from config in do_setup.
     # Isolation is not optional: every WEKAFS share is created inside its
@@ -143,7 +137,7 @@ class WekaShareDriver(driver.ShareDriver):
     _org_user = 'manila'
     _org_admin_secret = None
     _auth_token_dir = '/var/lib/manila/weka-tokens'
-    # Model B policy groups parsed from weka_security_policy_group:
+    # Shared policy groups parsed from weka_security_policy_group:
     #   {group: {'rw': [cidr, ...], 'ro': [cidr, ...]}}
     _policy_groups = {}
     _POLICY_GROUP_SPEC = 'weka:security_policy_group'
@@ -171,19 +165,17 @@ class WekaShareDriver(driver.ShareDriver):
         cfg_get = self.configuration.safe_get
 
         host = cfg_get('weka_api_server')
-        port = cfg_get('weka_api_port') or 14000
+        port = cfg_get('weka_api_port')
         username = cfg_get('weka_username')
         password = cfg_get('weka_password')
-        organization = cfg_get('weka_organization') or 'Root'
+        organization = cfg_get('weka_organization')
         ssl_verify = cfg_get('weka_ssl_verify')
         if ssl_verify is None:
             ssl_verify = True
-        timeout = cfg_get('weka_api_timeout') or 30
-        max_retries = cfg_get('weka_max_api_retries') or 3
-        pool_connections = (
-            cfg_get('weka_api_pool_connections') or 4
-        )
-        pool_maxsize = cfg_get('weka_api_pool_maxsize') or 10
+        timeout = cfg_get('weka_api_timeout')
+        max_retries = cfg_get('weka_max_api_retries')
+        pool_connections = cfg_get('weka_api_pool_connections')
+        pool_maxsize = cfg_get('weka_api_pool_maxsize')
 
         self._client = weka_client.WekaApiClient(
             host=host,
@@ -199,7 +191,7 @@ class WekaShareDriver(driver.ShareDriver):
         )
         self._client.login()
 
-        self._org_prefix = cfg_get('weka_org_prefix') or 'manila-'
+        self._org_prefix = cfg_get('weka_org_prefix')
         # The prefix names both the org and the auth-token file, so a
         # path separator would escape weka_auth_token_dir via os.path.join.
         if ('/' in self._org_prefix or '\\' in self._org_prefix
@@ -208,10 +200,9 @@ class WekaShareDriver(driver.ShareDriver):
                 reason=_(
                     'weka_org_prefix must not contain path separators: '
                     '%s') % self._org_prefix)
-        self._org_user = cfg_get('weka_org_user') or 'manila'
+        self._org_user = cfg_get('weka_org_user')
         self._org_admin_secret = cfg_get('weka_org_admin_secret')
-        self._auth_token_dir = (
-            cfg_get('weka_auth_token_dir') or '/var/lib/manila/weka-tokens')
+        self._auth_token_dir = cfg_get('weka_auth_token_dir')
         if not self._org_admin_secret:
             raise weka_exc.WekaConfigurationError(
                 reason=_(
@@ -246,7 +237,7 @@ class WekaShareDriver(driver.ShareDriver):
                 "for NFS shares."
             )
 
-        group_name = cfg_get('weka_filesystem_group') or 'default'
+        group_name = cfg_get('weka_filesystem_group')
         self._ensure_filesystem_group(group_name)
 
     def check_for_setup_error(self):
@@ -307,8 +298,7 @@ class WekaShareDriver(driver.ShareDriver):
 
         fs_name = self._share_name(share['id'])
         size_bytes = weka_utils.gb_to_bytes(share['size'])
-        group_name = (self.configuration.safe_get('weka_filesystem_group')
-                      or 'default')
+        group_name = self.configuration.safe_get('weka_filesystem_group')
 
         LOG.debug(
             "Creating share %s (protocol %s, size %s GiB) "
@@ -326,8 +316,8 @@ class WekaShareDriver(driver.ShareDriver):
             client=client, auth_required=auth_required)
         fs_uid = fs['uid']
 
-        # Model B: attach the share type's named policy group so access
-        # is enforced from creation (no-op without a group).
+        # Attach the share type's shared policy group so access is
+        # enforced from creation (no-op without a group).
         if self._is_isolated_wekafs(share):
             self._ensure_group_policies(share, fs_uid)
 
@@ -343,8 +333,7 @@ class WekaShareDriver(driver.ShareDriver):
         """Create a share from a snapshot; the copy runs in background.
 
         Returns STATUS_CREATING_FROM_SNAPSHOT immediately, for Manila to
-        poll via get_share_status.  The NFS copy path needs
-        weka_nfs_server.
+        poll via get_share_status.
         """
         share_proto = share['share_proto'].upper()
 
@@ -369,8 +358,7 @@ class WekaShareDriver(driver.ShareDriver):
         src_fs_name = src_fs['name']
 
         new_fs_name = self._share_name(share['id'])
-        group_name = (self.configuration.safe_get('weka_filesystem_group')
-                      or 'default')
+        group_name = self.configuration.safe_get('weka_filesystem_group')
         size_bytes = weka_utils.gb_to_bytes(share['size'])
 
         fs = self._create_filesystem_idempotent(
@@ -439,8 +427,8 @@ class WekaShareDriver(driver.ShareDriver):
 
     def _rsync_snapshot(self, src_snap_dir, dst_mnt):
         """Rsync a snapshot directory into a destination mount."""
-        LOG.info("Rsyncing snapshot data from %s to %s",
-                 src_snap_dir, dst_mnt)
+        LOG.debug("Rsyncing snapshot data from %s to %s",
+                  src_snap_dir, dst_mnt)
         weka_privsep.rsync(
             src_snap_dir.rstrip('/') + '/',
             dst_mnt.rstrip('/') + '/',
@@ -564,8 +552,7 @@ class WekaShareDriver(driver.ShareDriver):
                               src_fs_name, new_fs_name):
         """Copy snapshot data via WEKAFS POSIX mounts (context manager)."""
         snap_name = self._snapshot_name(snapshot['id'])
-        num_cores = (
-            self.configuration.safe_get('weka_num_cores') or 1)
+        num_cores = self.configuration.safe_get('weka_num_cores')
         net = self.configuration.safe_get('weka_net_device')
         # backends=None is deliberate: the Manila host is already a joined
         # Weka client, and passing backends=<addr>/<fs> triggers a second
@@ -667,17 +654,8 @@ class WekaShareDriver(driver.ShareDriver):
 
         fs_uid = fs['uid']
 
-        # No-op for WEKAFS.
-        try:
-            self._remove_all_nfs_permissions(fs_name)
-        except Exception as exc:
-            LOG.warning(
-                "Failed to remove NFS permissions for share %s: %s",
-                share['id'], exc,
-            )
-
-        # Model A policies must go while the filesystem still exists;
-        # shared Model B group policies are left in place.
+        # Per-share policies must go while the filesystem still exists;
+        # shared group policies are left in place.
         if self._is_isolated_wekafs(share):
             try:
                 self._cleanup_wekafs_policies(share, client, fs_uid)
@@ -697,11 +675,14 @@ class WekaShareDriver(driver.ShareDriver):
                     mount_point=mount_point,
                 )
                 mnt.unmount(force=True)
-            except Exception as exc:
-                LOG.warning(
-                    "Failed to unmount %s during delete of share %s: %s",
-                    mount_point, share['id'], exc,
+            except Exception:
+                # Deleting the filesystem under a stuck mount would wedge
+                # the share manager; fail the delete instead.
+                LOG.exception(
+                    "Failed to unmount %s during delete of share %s",
+                    mount_point, share['id'],
                 )
+                raise
 
         try:
             client.delete_filesystem(fs_uid)
@@ -715,7 +696,7 @@ class WekaShareDriver(driver.ShareDriver):
         client = self._client_for_share(share)
         fs_uid = self._get_fs_uid_for_share(share, client=client)
         new_bytes = weka_utils.gb_to_bytes(new_size)
-        LOG.info(
+        LOG.debug(
             "Extending share %s to %s GiB", share['id'], new_size)
         client.update_filesystem(fs_uid, total_capacity=new_bytes)
 
@@ -731,7 +712,7 @@ class WekaShareDriver(driver.ShareDriver):
             raise exception.ShareShrinkingPossibleDataLoss(
                 share_id=share['id'])
 
-        LOG.info(
+        LOG.debug(
             "Shrinking share %s to %s GiB", share['id'], new_size)
         client.update_filesystem(fs_uid, total_capacity=new_bytes)
 
@@ -749,14 +730,8 @@ class WekaShareDriver(driver.ShareDriver):
 
         A share whose filesystem is gone is reported STATUS_ERROR.
         """
-        try:
-            all_fs = self._client.list_filesystems() or []
-        except Exception as exc:
-            LOG.warning(
-                "Failed to list filesystems during ensure_shares: %s",
-                exc)
-            all_fs = []
-        fs_by_name = {fs['name']: fs for fs in all_fs}
+        fs_by_name = {
+            fs['name']: fs for fs in self._client.list_filesystems() or []}
 
         updates = {}
         for share in shares:
@@ -809,8 +784,7 @@ class WekaShareDriver(driver.ShareDriver):
                 mount_point=mount_point,
                 auth_token_path=self._org_token_file(
                     share.get('project_id')),
-                num_cores=(
-                    self.configuration.safe_get('weka_num_cores') or 1),
+                num_cores=self.configuration.safe_get('weka_num_cores'),
                 net=self.configuration.safe_get('weka_net_device'),
             )
             mnt.mount()
@@ -870,17 +844,11 @@ class WekaShareDriver(driver.ShareDriver):
                 continue
             if _is_ipv6(rule['access_to']):
                 LOG.warning(
-                    "IPv6 access rule %s rejected; Weka driver "
-                    "supports IPv4 only.",
-                    rule['access_id'],
+                    "Ignoring IPv6 access rule %s: Weka supports IPv4 "
+                    "rules only.", rule['access_id'],
                 )
                 rule_state_map[rule['access_id']] = {'state': 'error'}
-                raise exception.InvalidShareAccess(
-                    reason=_(
-                        'Weka driver supports IPv4 access rules only; '
-                        'IPv6 address "%s" is not supported.'
-                    ) % rule['access_to']
-                )
+                continue
             try:
                 self._apply_nfs_rule(share, fs_name, rule)
                 rule_state_map[rule['access_id']] = {'state': 'active'}
@@ -1030,10 +998,10 @@ class WekaShareDriver(driver.ShareDriver):
                               full_sync):
         """Apply WEKAFS rules as per-share Weka security policies.
 
-        Model B (share type sets weka:security_policy_group) is governed
-        by the group policies attached at create_share, so rules are
-        accepted as-is.  Model A maps each ip rule to the share's rw or
-        ro policy.  Non-ip rules grant only the org mount credential,
+        A share whose type sets weka:security_policy_group is governed
+        by the shared group policies attached at create_share, so rules
+        are accepted as-is.  Otherwise each ip rule maps to the share's
+        own rw or ro policy.  Non-ip rules grant only the org mount credential,
         which every rule returns as its access_key.  The access model is
         described in the admin doc.
         """
@@ -1053,11 +1021,11 @@ class WekaShareDriver(driver.ShareDriver):
 
         rule_state_map = {}
 
-        # Model B: the group attached at create_share governs access, so
+        # The shared group attached at create_share governs access, so
         # per-rule IPs are a no-op here.
         if self._share_policy_group(share) is not None:
             for rule in add_rules or []:
-                LOG.info(
+                LOG.warning(
                     "WEKAFS share %s uses security-policy group access; "
                     "per-rule entry %s (type=%s) accepted as active.",
                     share['id'], rule['access_id'], rule['access_type'],
@@ -1066,7 +1034,7 @@ class WekaShareDriver(driver.ShareDriver):
                     'state': 'active', 'access_key': mount_password}
             return rule_state_map
 
-        # Model A: per-share rw/ro policies.  The filesystem UID is only
+        # Per-share rw/ro policies.  The filesystem UID is only
         # needed to attach or detach a policy — ip rules and a full sync,
         # whose pruning can empty (and so detach) one.
         ip_work = any(
@@ -1082,7 +1050,7 @@ class WekaShareDriver(driver.ShareDriver):
             if rule['access_type'] != 'ip':
                 # user/cert rules map to no IP policy: they grant the
                 # org-boundary credential without an IP restriction.
-                LOG.info(
+                LOG.warning(
                     "WEKAFS rule %s (type=%s) grants the org-boundary "
                     "mount credential; no per-share IP policy created.",
                     rule['access_id'], rule['access_type'],
@@ -1123,7 +1091,7 @@ class WekaShareDriver(driver.ShareDriver):
         return rule_state_map
 
     def _prune_wekafs_rules(self, org_client, share, fs_uid, expected_rules):
-        """Full sync (Model A): drop policy IPs no ip rule backs."""
+        """Full sync: drop per-share policy IPs no ip rule backs."""
         expected = {'rw': set(), 'ro': set()}
         for rule in expected_rules or []:
             if rule.get('access_type') != 'ip':
@@ -1283,7 +1251,7 @@ class WekaShareDriver(driver.ShareDriver):
         fs_uid = self._get_fs_uid_for_share(share, client=client)
         snap_name = self._snapshot_name(snapshot['id'])
 
-        LOG.info(
+        LOG.debug(
             "Creating snapshot %s (name='%s') for share %s",
             snapshot['id'], snap_name, share['id'],
         )
@@ -1298,20 +1266,20 @@ class WekaShareDriver(driver.ShareDriver):
         try:
             fs_uid = self._get_fs_uid_for_share(share, client=client)
         except exception.ShareNotFound:
-            LOG.info(
+            LOG.warning(
                 "Parent share %s not found — skipping snapshot delete",
                 share['id'],
             )
             return
 
         snap_name = self._snapshot_name(snapshot['id'])
-        LOG.info(
+        LOG.debug(
             "Deleting snapshot %s (name='%s')",
             snapshot['id'], snap_name,
         )
         snap = client.get_snapshot_by_name(snap_name, fs_uid=fs_uid)
         if not snap:
-            LOG.info(
+            LOG.warning(
                 "Snapshot '%s' not found — already deleted", snap_name)
             return
         try:
@@ -1331,7 +1299,7 @@ class WekaShareDriver(driver.ShareDriver):
         if not snap:
             raise exception.ShareSnapshotNotFound(snapshot_id=snapshot['id'])
 
-        LOG.info(
+        LOG.debug(
             "Reverting share %s to snapshot %s",
             share['id'], snapshot['id'],
         )
@@ -1353,18 +1321,13 @@ class WekaShareDriver(driver.ShareDriver):
         used_bytes = capacity.get('usedBytes', 0) or 0
         free_bytes = max(0, total_bytes - used_bytes)
 
-        backend_name = (
-            self.configuration.safe_get('share_backend_name') or 'weka')
-        group_name = (
-            self.configuration.safe_get('weka_filesystem_group') or 'default')
-
-        reserved_pct = (
-            self.configuration.safe_get('reserved_percentage') or 0)
-        max_over_sub = (
-            self.configuration.safe_get('max_over_subscription_ratio') or 1.0)
+        cfg_get = self.configuration.safe_get
+        group_name = cfg_get('weka_filesystem_group')
+        reserved_pct = cfg_get('reserved_share_percentage')
+        reserved_snap_pct = cfg_get('reserved_share_from_snapshot_percentage')
+        reserved_extend_pct = cfg_get('reserved_share_extend_percentage')
 
         stats = {
-            'share_backend_name': backend_name,
             'vendor_name': 'Weka',
             'driver_version': DRIVER_VERSION,
             # Underscore-joined ("WEKAFS_NFS"), not a list: the scheduler
@@ -1374,8 +1337,10 @@ class WekaShareDriver(driver.ShareDriver):
             'total_capacity_gb': weka_utils.bytes_to_gb(total_bytes),
             'free_capacity_gb': weka_utils.bytes_to_gb(free_bytes),
             'reserved_percentage': reserved_pct,
-            'max_over_subscription_ratio': max_over_sub,
-            'reserved_snapshot_percentage': 0,
+            'reserved_snapshot_percentage': reserved_snap_pct,
+            'reserved_share_extend_percentage': reserved_extend_pct,
+            'max_over_subscription_ratio': cfg_get(
+                'max_over_subscription_ratio'),
             'snapshot_support': True,
             # WEKAFS copy always works; NFS fails fast when unconfigured.
             'create_share_from_snapshot_support': True,
@@ -1388,8 +1353,8 @@ class WekaShareDriver(driver.ShareDriver):
                 'total_capacity_gb': weka_utils.bytes_to_gb(total_bytes),
                 'free_capacity_gb': weka_utils.bytes_to_gb(free_bytes),
                 'reserved_percentage': reserved_pct,
-                'reserved_snapshot_percentage': 0,
-                'reserved_share_extend_percentage': 0,
+                'reserved_snapshot_percentage': reserved_snap_pct,
+                'reserved_share_extend_percentage': reserved_extend_pct,
             }],
         }
         super(WekaShareDriver, self)._update_share_stats(stats)
@@ -1467,7 +1432,7 @@ class WekaShareDriver(driver.ShareDriver):
 
     def unmanage(self, share):
         """Stop tracking a share; the Weka filesystem is left intact."""
-        LOG.info(
+        LOG.debug(
             "Unmanaging share %s — Weka filesystem '%s' preserved",
             share['id'], self._share_name(share['id']),
         )
@@ -1486,8 +1451,7 @@ class WekaShareDriver(driver.ShareDriver):
 
     def _share_name(self, share_id):
         """Filesystem name for a share ID (32-char cluster limit)."""
-        prefix = (self.configuration.safe_get('weka_share_name_prefix')
-                  or 'manila_')
+        prefix = self.configuration.safe_get('weka_share_name_prefix')
         id_hex = share_id.replace('-', '')
         max_id_len = 32 - len(prefix)
         return prefix + id_hex[:max_id_len]
@@ -1503,8 +1467,7 @@ class WekaShareDriver(driver.ShareDriver):
 
     def _mount_point(self, fs_name):
         """Return the local mount point directory for a filesystem."""
-        base = (self.configuration.safe_get('weka_mount_point_base')
-                or '/mnt/weka')
+        base = self.configuration.safe_get('weka_mount_point_base')
         return os.path.join(base, fs_name)
 
     def _get_backends(self):
@@ -1567,7 +1530,7 @@ class WekaShareDriver(driver.ShareDriver):
 
     @staticmethod
     def _wekafs_policy_name(share_id, level):
-        """Per-share Model A policy name for an access level (rw/ro)."""
+        """Per-share policy name for an access level (rw/ro)."""
         return 'manila-{}-{}'.format(share_id[:8], level)
 
     @staticmethod
@@ -1601,7 +1564,7 @@ class WekaShareDriver(driver.ShareDriver):
 
     @staticmethod
     def _group_policy_name(group, level):
-        """Shared Model B policy name for a named group + level (rw/ro)."""
+        """Shared policy name for a named group + level (rw/ro)."""
         return 'manila-grp-{}-{}'.format(group, level)
 
     @staticmethod
@@ -1637,7 +1600,7 @@ class WekaShareDriver(driver.ShareDriver):
         return groups
 
     def _share_policy_group(self, share):
-        """Named policy group from the share type, or None (Model A)."""
+        """Named policy group from the share type, or None."""
         type_id = share.get('share_type_id')
         if not type_id:
             return None
@@ -1651,7 +1614,7 @@ class WekaShareDriver(driver.ShareDriver):
         return specs.get(self._POLICY_GROUP_SPEC) or None
 
     def _ensure_group_policies(self, share, fs_uid):
-        """Create (once per org) and attach a Model B group's policies."""
+        """Create (once per org) and attach a shared group's policies."""
         group = self._share_policy_group(share)
         if not group:
             return
@@ -1685,7 +1648,7 @@ class WekaShareDriver(driver.ShareDriver):
             group, share['id'])
 
     def _cleanup_wekafs_policies(self, share, org_client, fs_uid):
-        """Detach and delete the share's Model A policies.
+        """Detach and delete the share's own policies.
 
         Shared ``manila-grp-*`` policies never match these names and are
         left in place.

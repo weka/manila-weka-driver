@@ -1,4 +1,4 @@
-# Copyright 2024 Weka.IO Ltd.
+# Copyright 2026 Weka.IO Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -14,13 +14,13 @@
 
 """Unit tests for manila.share.drivers.weka.posix."""
 
-import unittest
 from unittest import mock
 
 from oslo_concurrency import processutils
 
 from manila.share.drivers.weka import exceptions as weka_exc
 from manila.share.drivers.weka import posix as weka_posix
+from manila import test
 
 
 _BACKENDS = '10.0.0.1,10.0.0.2'
@@ -46,7 +46,7 @@ def _make_mount(**kwargs):
     return weka_posix.WekaMount(**defaults)
 
 
-class TestWekaMountBuildOptions(unittest.TestCase):
+class TestWekaMountBuildOptions(test.TestCase):
 
     def test_default_options(self):
         m = _make_mount(num_cores=1)
@@ -96,7 +96,7 @@ class TestWekaMountBuildOptions(unittest.TestCase):
         self.assertIn('num_cores=4', opts)
 
 
-class TestWekaMountIsMount(unittest.TestCase):
+class TestWekaMountIsMount(test.TestCase):
 
     def test_is_mounted_true(self):
         proc_content = (
@@ -131,7 +131,7 @@ class TestWekaMountIsMount(unittest.TestCase):
         self.assertFalse(result)
 
 
-class TestWekaMountMount(unittest.TestCase):
+class TestWekaMountMount(test.TestCase):
 
     def test_mount_calls_correct_command(self):
         m = _make_mount(num_cores=2)
@@ -222,7 +222,7 @@ class TestWekaMountMount(unittest.TestCase):
                         weka_exc.WekaMountError, m.mount)
 
 
-class TestWekaMountUnmount(unittest.TestCase):
+class TestWekaMountUnmount(test.TestCase):
 
     def test_unmount_calls_umount(self):
         m = _make_mount()
@@ -266,7 +266,7 @@ class TestWekaMountUnmount(unittest.TestCase):
                 self.assertRaises(weka_exc.WekaUnmountError, m.unmount)
 
 
-class TestWekaMountContextManager(unittest.TestCase):
+class TestWekaMountContextManager(test.TestCase):
 
     def test_context_manager_mounts_and_unmounts(self):
         m = _make_mount()
@@ -315,7 +315,7 @@ class TestWekaMountContextManager(unittest.TestCase):
                             pass
 
 
-class TestWekaMountSharePath(unittest.TestCase):
+class TestWekaMountSharePath(test.TestCase):
 
     def test_get_or_create_share_path_creates_dir(self):
         m = _make_mount()
@@ -411,7 +411,3 @@ class TestWekaMountSharePath(unittest.TestCase):
             self.assertRaises(
                 weka_exc.WekaMountError,
                 m.get_directory_inode, '/nonexistent')
-
-
-if __name__ == '__main__':
-    unittest.main()
