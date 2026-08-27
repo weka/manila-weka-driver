@@ -302,6 +302,7 @@ class TestWekaApiClientAuth(test.TestCase):
 class TestWekaApiClientFilesystems(test.TestCase):
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -391,6 +392,7 @@ class TestWekaApiClientFilesystems(test.TestCase):
 class TestWekaApiClientFilesystemGroups(test.TestCase):
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -431,6 +433,7 @@ class TestWekaApiClientFilesystemGroups(test.TestCase):
 class TestWekaApiClientSnapshots(test.TestCase):
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -514,6 +517,7 @@ class TestWekaApiClientSnapshots(test.TestCase):
 class TestWekaApiClientNFS(test.TestCase):
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -581,6 +585,7 @@ class TestWekaApiClientNFS(test.TestCase):
 class TestWekaApiClientSecurityPolicies(test.TestCase):
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -702,6 +707,7 @@ class TestWekaApiClientSecurityPolicies(test.TestCase):
 class TestWekaApiClientCapacity(test.TestCase):
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -728,6 +734,7 @@ class TestWekaApiClientSDKStubs(test.TestCase):
     """Smoke tests for NFS client group methods."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -766,6 +773,7 @@ class TestWekaApiClientSDKStubs(test.TestCase):
 class TestWekaApiClientOrganizations(test.TestCase):
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -860,6 +868,7 @@ class TestWekaApiClientRetry(test.TestCase):
     """Test retry/backoff paths in _request."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=2)
@@ -890,6 +899,7 @@ class TestWekaApiClientDelete(test.TestCase):
     """Test _delete helper branches."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -927,6 +937,7 @@ class TestWekaApiClientPatch(test.TestCase):
     """Test _patch helper."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -949,6 +960,7 @@ class TestWekaApiClientRefreshFallback(test.TestCase):
     """Test _refresh_or_login exception fallback branch."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -968,6 +980,7 @@ class TestCreateOrganizationOptionalKwargs(test.TestCase):
     """Test optional quota params in create_organization."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -1006,6 +1019,7 @@ class TestCreateFilesystemOptionalKwargs(test.TestCase):
     """Test optional params in create_filesystem."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -1050,6 +1064,7 @@ class TestUpdateFilesystemOptionalKwargs(test.TestCase):
     """Test optional params in update_filesystem."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -1094,6 +1109,7 @@ class TestGetFilesystemGroup(test.TestCase):
     """Test get_filesystem_group."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -1112,6 +1128,7 @@ class TestCreateFilesystemGroupOptionalKwargs(test.TestCase):
     """Test optional params in create_filesystem_group."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -1145,6 +1162,7 @@ class TestCreateNfsPermissionOptionalKwargs(test.TestCase):
     """Test optional params in create_nfs_permission."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -1186,6 +1204,7 @@ class TestDeleteClientGroup(test.TestCase):
     """Test delete_client_group error-handling paths."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)
@@ -1244,6 +1263,7 @@ class TestGetCapacityFallback(test.TestCase):
     """Test get_capacity /drives fallback for Weka 5.x."""
 
     def setUp(self):
+        super().setUp()
         self.client = weka_client.WekaApiClient(
             host='weka-test', username='admin', password='secret',
             ssl_verify=False, timeout=5, max_retries=0)

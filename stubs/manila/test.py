@@ -22,4 +22,22 @@ import unittest
 
 
 class TestCase(unittest.TestCase):
-    """Stand-in for manila.test.TestCase."""
+    """Stand-in for manila.test.TestCase.
+
+    Upstream is testtools-based and fails a test whose setUp does not
+    upcall, so enforce that here too rather than discovering it in the
+    in-tree gate.
+    """
+
+    _upcalled = False
+
+    def setUp(self):
+        super().setUp()
+        self._upcalled = True
+
+    def run(self, *args, **kwargs):
+        result = super().run(*args, **kwargs)
+        if not self._upcalled:
+            raise ValueError(
+                '%s.setUp did not call super().setUp()' % type(self).__name__)
+        return result
