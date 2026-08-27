@@ -26,10 +26,10 @@ from oslo_concurrency import processutils
 from oslo_config import cfg
 
 from manila import exception
-from manila import test
 from manila.share.drivers.weka import driver as weka_driver
 from manila.share.drivers.weka import exceptions as weka_exc
 from manila.share.drivers.weka import posix as weka_posix
+from manila import test
 from tests.unit import fakes
 
 CONF = cfg.CONF
@@ -2741,10 +2741,11 @@ class TestDeleteShareEdgeCases(test.TestCase):
 
         with mock.patch.object(weka_posix.WekaMount, 'is_mounted',
                                return_value=True):
-            with mock.patch.object(weka_posix.WekaMount, 'unmount',
-                                   side_effect=Exception('unmount failed')):
+            with mock.patch.object(
+                    weka_posix.WekaMount, 'unmount',
+                    side_effect=weka_exc.WekaUnmountError(reason='stuck')):
                 self.assertRaises(
-                    Exception, drv.delete_share,
+                    weka_exc.WekaUnmountError, drv.delete_share,
                     None, fakes.fake_share())
 
         drv._client.delete_filesystem.assert_not_called()
@@ -2776,10 +2777,11 @@ class TestEnsureSharesEdgeCases(test.TestCase):
 
     def test_ensure_shares_propagates_list_failure(self):
         drv = self._make_driver()
-        drv._client.list_filesystems.side_effect = Exception('api down')
+        drv._client.list_filesystems.side_effect = weka_exc.WekaApiError(
+            status_code=500, reason='api down')
 
         self.assertRaises(
-            Exception, drv.ensure_shares,
+            weka_exc.WekaApiError, drv.ensure_shares,
             None, [fakes.fake_share(proto='WEKAFS')])
 
     def test_ensure_share_nfs_falls_back_to_api_when_no_fs_by_name(self):
