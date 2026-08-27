@@ -830,7 +830,6 @@ class WekaShareDriver(driver.ShareDriver):
                     "Ignoring IPv6 access rule %s: Weka supports IPv4 "
                     "rules only.", rule['access_id'],
                 )
-                rule_state_map[rule['access_id']] = {'state': 'error'}
                 continue
             try:
                 self._apply_nfs_rule(share, fs_name, rule)
@@ -1041,10 +1040,9 @@ class WekaShareDriver(driver.ShareDriver):
                 continue
             if _is_ipv6(rule['access_to']):
                 LOG.warning(
-                    "IPv6 access rule %s rejected; Weka driver supports "
-                    "IPv4 only.", rule['access_id'],
+                    "Ignoring IPv6 access rule %s: Weka supports IPv4 "
+                    "rules only.", rule['access_id'],
                 )
-                rule_state_map[rule['access_id']] = {'state': 'error'}
                 continue
             try:
                 self._apply_wekafs_rule(org_client, share, fs_uid, rule)

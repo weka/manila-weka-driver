@@ -1254,7 +1254,7 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
 
         drv._client.delete_security_policy.assert_not_called()
 
-    def test_update_access_wekafs_ipv6_ip_rule_errors(self):
+    def test_update_access_wekafs_ipv6_ip_rule_ignored(self):
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
             fakes.fake_filesystem())
@@ -1265,7 +1265,7 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
             context=None, share=share,
             access_rules=[], add_rules=[rule], delete_rules=[],
             update_rules=[])
-        self.assertEqual('error', result[rule['access_id']]['state'])
+        self.assertNotIn(rule['access_id'], result)
         drv._client.create_security_policy.assert_not_called()
 
     def test_update_access_wekafs_delete_ipv6_rule_is_noop(self):
@@ -1283,7 +1283,7 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         self.assertEqual({}, result)
         drv._client.get_security_policy_by_name.assert_not_called()
 
-    def test_update_access_nfs_ipv6_rule_errors_only_that_rule(self):
+    def test_update_access_nfs_ipv6_rule_ignored_batch_unaffected(self):
         """A bad rule in a batch must not fail the valid rules with it."""
         drv = self._make_driver()
         drv._client.get_filesystem_by_name.return_value = (
@@ -1308,7 +1308,7 @@ class TestWekaShareDriverUpdateAccess(test.TestCase):
         result = drv.update_access(
             None, share, [], [bad] + good, [], [])
 
-        self.assertEqual('error', result['r-ipv6']['state'])
+        self.assertNotIn('r-ipv6', result)
         for rule in good:
             self.assertEqual(
                 'active', result[rule['access_id']]['state'])
