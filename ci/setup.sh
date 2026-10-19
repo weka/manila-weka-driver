@@ -203,6 +203,18 @@ rm -f /etc/nginx/sites-enabled/default
 systemctl restart nginx
 systemctl enable nginx
 
+# Oracle's Ubuntu images ship iptables rules that REJECT every new inbound
+# connection except SSH, so the log links posted to Gerrit would be dead even
+# with the cloud firewall open. Allow 8088 ahead of the REJECT and persist it.
+if ! iptables -C INPUT -p tcp -m state --state NEW -m tcp --dport 8088 -j ACCEPT 2>/dev/null; then
+    _reject=$(iptables -L INPUT --line-numbers -n | awk '$2 == "REJECT" {print $1; exit}')
+    iptables -I INPUT "${_reject:-1}" -p tcp -m state --state NEW -m tcp --dport 8088 -j ACCEPT
+    unset _reject
+fi
+if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save
+fi
+
 # ── 7. Install systemd services ──────────────────────────────────────────────
 
 log "Installing systemd services"
