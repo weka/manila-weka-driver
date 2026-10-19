@@ -318,7 +318,10 @@ fi
 # ── 10. Create share types ───────────────────────────────────────────────────
 
 log "Creating share types"
+# cd first: the caller's cwd (e.g. /home/ubuntu) is unreadable to stack, and
+# the openstack CLI then dies stat()ing a relative entry on its sys.path.
 sudo -u stack WEKA_ENABLE_NFS="${WEKA_ENABLE_NFS}" bash -c "
+    cd /opt/stack
     source /opt/stack/devstack/openrc admin admin
     if [ \"\$WEKA_ENABLE_NFS\" = true ]; then
         openstack share type create weka-nfs false \
