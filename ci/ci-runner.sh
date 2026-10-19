@@ -292,18 +292,26 @@ TOTAL_DURATION=$((END_TIME - START_TIME))
 
 if [ "$TEMPEST_RC" -eq 0 ]; then
     RESULT="SUCCESS"
-    # Extract test counts from tempest output
-    SUMMARY=$(tail -5 "${LOG_DIR}/tempest.log" | grep -E "Ran|passed|failed" | head -1 || echo "")
+    # run-tempest.sh ends tempest.log with the one-line aggregate summary
+    SUMMARY=$(tail -n 1 "${LOG_DIR}/tempest.log" 2>/dev/null || echo "")
     MSG="All tests passed. ${SUMMARY} (${TEMPEST_DURATION}s). Total: ${TOTAL_DURATION}s"
 else
     RESULT="FAILURE"
-    SUMMARY=$(tail -5 "${LOG_DIR}/tempest.log" | grep -E "Ran|passed|failed" | head -1 || echo "")
+    SUMMARY=$(tail -n 1 "${LOG_DIR}/tempest.log" 2>/dev/null || echo "")
     MSG="Tests failed. ${SUMMARY} (${TEMPEST_DURATION}s). Total: ${TOTAL_DURATION}s"
 fi
 
 log "Phase 7: Posting results (${RESULT})"
 "${CI_DIR}/post-results.sh" "$CHANGE_NUM" "$PATCHSET_NUM" "$REVISION" \
     "$RESULT" "$MSG" "$LOG_DIR"
+
+# ── Phase 7.5: Reap the Weka orgs this run left behind ───────────────────────
+# Same reaper as Phase 4.5, now that tempest has deleted its shares, so the
+# run's orgs don't sit on a shared cluster until the next job. After posting,
+# so it never delays the result. Non-fatal.
+
+log "Phase 7.5: Reaping Weka orgs left by this run"
+"${CI_DIR}/weka-org-cleanup.sh" || true
 
 # ── Phase 8: Restore clean master ────────────────────────────────────────────
 

@@ -144,6 +144,7 @@ ssh "${SSH_USER}@${VM_IP}" "
          WEKA_ORG_ADMIN_SECRET='${WEKA_ORG_ADMIN_SECRET:-}' \
          WEKA_NFS_SERVER='${WEKA_NFS_SERVER:-}' \
          CI_TRUSTED_USERS='${CI_TRUSTED_USERS:-}' \
+         CI_TRUSTED_GROUPS='${CI_TRUSTED_GROUPS:-}' \
          CI_VM_IP='${VM_IP}' \
          GERRIT_USER='${GERRIT_USER}' \
          CI_ALLOWED_CIDRS='${CI_ALLOWED_CIDRS:-}' \
