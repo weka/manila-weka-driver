@@ -24,6 +24,8 @@
 #   CI_DIR           (env)        — CI scripts directory          (default /opt/weka-ci)
 #   TEMPEST_CONF     (env)        — path to tempest.conf
 #                                   (default /opt/stack/tempest/etc/tempest.conf)
+#   WEKA_ENABLE_NFS  (env)        — "false" skips the NFS pass (WEKAFS-only
+#                                   cluster); default true
 #
 # Exit codes:
 #   0  both passes passed
@@ -41,6 +43,7 @@ INCLUDE_LIST="${INCLUDE_LIST:-${2:-${CI_DIR}/tempest-include.txt}}"
 TIMEOUT_TEMPEST="${TIMEOUT_TEMPEST:-3600}"
 TEMPEST_CONF="${TEMPEST_CONF:-/opt/stack/tempest/etc/tempest.conf}"
 EXCLUDE_LIST="${EXCLUDE_LIST:-${CI_DIR}/tempest-exclude.txt}"
+WEKA_ENABLE_NFS="${WEKA_ENABLE_NFS:-true}"
 
 if [ -z "$LOG_DIR" ]; then
     echo "ERROR: LOG_DIR must be set (env or \$1)" >&2
@@ -102,14 +105,24 @@ run_tempest_pass() {
 # ── Pass 1: NFS default ───────────────────────────────────────────────────────
 # tempest.conf already has enable_protocols=nfs,wekafs and
 # default_share_type_name=weka-nfs (set by full-redeploy.sh); no change needed.
-run_tempest_pass "NFS default" "${LOG_DIR}/tempest-nfs.log"
-RC_NFS=$RC
+if [ "$WEKA_ENABLE_NFS" = "true" ]; then
+    run_tempest_pass "NFS default" "${LOG_DIR}/tempest-nfs.log"
+    RC_NFS=$RC
+else
+    log "WEKA_ENABLE_NFS=${WEKA_ENABLE_NFS}; skipping the NFS pass"
+    echo "skipped (WEKAFS-only cluster)" > "${LOG_DIR}/tempest-nfs.log"
+    RC_NFS=0
+fi
 
 # ── Pass 2: WEKAFS default ────────────────────────────────────────────────────
 # Only enable_protocols[0] and the default share type are position-sensitive;
 # enable_ip_rules_for_protocols / enable_ro_access_level_for_protocols are
 # membership lists that already include wekafs, so they need no flip.
-iniset "$TEMPEST_CONF" share enable_protocols wekafs,nfs
+if [ "$WEKA_ENABLE_NFS" = "true" ]; then
+    iniset "$TEMPEST_CONF" share enable_protocols wekafs,nfs
+else
+    iniset "$TEMPEST_CONF" share enable_protocols wekafs
+fi
 iniset "$TEMPEST_CONF" share default_share_type_name weka-wekafs
 run_tempest_pass "WEKAFS default" "${LOG_DIR}/tempest-wekafs.log"
 RC_WEKAFS=$RC

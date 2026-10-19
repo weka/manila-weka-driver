@@ -222,12 +222,32 @@ if [ -f "${WEKA_REPO}/ci/local.conf.template" ]; then
     cp "${WEKA_REPO}/ci/local.conf.template" "${CI_DIR}/local.conf.template"
 fi
 
+# WEKA_ENABLE_NFS=false runs a WEKAFS-only CI for clusters without an NFS
+# gateway: the weka_nfs backend, its share type, its health checks and the NFS
+# tempest pass are all dropped.
+export WEKA_ENABLE_NFS="${WEKA_ENABLE_NFS:-true}"
+if [ "$WEKA_ENABLE_NFS" = "true" ]; then
+    export WEKA_ENABLED_BACKENDS="weka_nfs,weka_wekafs"
+    export WEKA_ENABLED_PROTOCOLS="NFS,WEKAFS"
+    export WEKA_DEFAULT_BACKEND="weka_nfs"
+    export WEKA_DEFAULT_SHARE_TYPE="weka-nfs"
+    TEMPEST_PROTOCOLS="nfs,wekafs"
+else
+    export WEKA_ENABLED_BACKENDS="weka_wekafs"
+    export WEKA_ENABLED_PROTOCOLS="WEKAFS"
+    export WEKA_DEFAULT_BACKEND="weka_wekafs"
+    export WEKA_DEFAULT_SHARE_TYPE="weka-wekafs"
+    TEMPEST_PROTOCOLS="wekafs"
+fi
+# Must match the prefix weka-org-cleanup.sh reaps, or it deletes the wrong orgs.
+export WEKA_ORG_PREFIX="${WEKA_ORG_PREFIX:-manila-}"
+
 # Install local.conf from template, substituting environment variables
 export CI_HOST_IP="$(hostname -I | awk '{print $1}')"
 # WEKA_PASSWORD is deliberately excluded: it must never be substituted into
 # local.conf (which DevStack echoes via `set -x` into stack.sh.log). It is set
 # directly in manila.conf post-stack, untraced (see below).
-envsubst '$CI_HOST_IP $CI_VM_IP $WEKA_API_SERVER $WEKA_API_PORT $WEKA_USERNAME $WEKA_ORGANIZATION' < "${CI_DIR}/local.conf.template" > "${DEVSTACK_DIR}/local.conf"
+envsubst '$CI_HOST_IP $CI_VM_IP $WEKA_API_SERVER $WEKA_API_PORT $WEKA_USERNAME $WEKA_ORGANIZATION $WEKA_ENABLED_BACKENDS $WEKA_ENABLED_PROTOCOLS $WEKA_DEFAULT_BACKEND $WEKA_DEFAULT_SHARE_TYPE $WEKA_ORG_PREFIX' < "${CI_DIR}/local.conf.template" > "${DEVSTACK_DIR}/local.conf"
 
 cd "$DEVSTACK_DIR"
 # 9>&- closes the inherited lock fd so stack.sh's async children
@@ -330,12 +350,14 @@ set +u  # devstack openrc/functions uses unbound vars; tolerate during source
 source "${DEVSTACK_DIR}/openrc" admin admin
 set -u
 
-openstack share type create weka-nfs false \
-    --extra-specs share_backend_name=weka_nfs \
-    snapshot_support=true \
-    create_share_from_snapshot_support=true \
-    revert_to_snapshot_support=true \
-    2>&1 || log "WARNING: Failed to create weka-nfs share type (may already exist)"
+if [ "$WEKA_ENABLE_NFS" = "true" ]; then
+    openstack share type create weka-nfs false \
+        --extra-specs share_backend_name=weka_nfs \
+        snapshot_support=true \
+        create_share_from_snapshot_support=true \
+        revert_to_snapshot_support=true \
+        2>&1 || log "WARNING: Failed to create weka-nfs share type (may already exist)"
+fi
 
 # NOTE: do NOT set a share_proto extra-spec — CapabilitiesFilter would match
 # it against the driver's storage_protocol ("WEKAFS_NFS"), so 'WEKAFS' alone
@@ -361,19 +383,23 @@ if [ -f "$TEMPEST_CONF" ]; then
     set +u
     source "${DEVSTACK_DIR}/functions"
     # DHSS=false, no Neutron: don't create share networks, or all tests skip.
-    iniset "$TEMPEST_CONF" share multi_backend true
-    iniset "$TEMPEST_CONF" share backend_names weka_nfs,weka_wekafs
+    if [ "$WEKA_ENABLE_NFS" = "true" ]; then
+        iniset "$TEMPEST_CONF" share multi_backend true
+    else
+        iniset "$TEMPEST_CONF" share multi_backend false
+    fi
+    iniset "$TEMPEST_CONF" share backend_names "$WEKA_ENABLED_BACKENDS"
     iniset "$TEMPEST_CONF" share multitenancy_enabled false
     iniset "$TEMPEST_CONF" share create_networks_when_multitenancy_enabled false
-    iniset "$TEMPEST_CONF" share default_share_type_name weka-nfs
+    iniset "$TEMPEST_CONF" share default_share_type_name "$WEKA_DEFAULT_SHARE_TYPE"
     # Both protocols are tested: nfs is the pass-1 default; ci-runner's
     # run-tempest.sh runs a second pass with wekafs as the default (and
     # default_share_type_name=weka-wekafs), which runs the plugin's own
     # lifecycle tests and ShareRulesTest against WEKAFS shares directly.
     # No upstream-plugin patching is needed or done.
-    iniset "$TEMPEST_CONF" share enable_protocols nfs,wekafs
-    iniset "$TEMPEST_CONF" share enable_ip_rules_for_protocols nfs,wekafs
-    iniset "$TEMPEST_CONF" share enable_ro_access_level_for_protocols nfs,wekafs
+    iniset "$TEMPEST_CONF" share enable_protocols "$TEMPEST_PROTOCOLS"
+    iniset "$TEMPEST_CONF" share enable_ip_rules_for_protocols "$TEMPEST_PROTOCOLS"
+    iniset "$TEMPEST_CONF" share enable_ro_access_level_for_protocols "$TEMPEST_PROTOCOLS"
     iniset "$TEMPEST_CONF" share run_snapshot_tests true
     iniset "$TEMPEST_CONF" share run_revert_to_snapshot_tests true
     iniset "$TEMPEST_CONF" share run_shrink_tests true
@@ -483,7 +509,7 @@ print(next((c["ips"][0] for c in d
 # redeploy under `set -e`. Restore `set -e` after the block.
 set +e
 for _attempt in 1 2 3 4 5; do
-    _login=$(weka user login admin "${WEKA_PASSWORD:-}" \
+    _login=$(weka user login "${WEKA_USERNAME:-admin}" "${WEKA_PASSWORD:-}" \
         -H "${WEKA_API_SERVER:-}" -P "${WEKA_API_PORT:-14000}" 2>&1)
     if echo "$_login" | grep -qi "locked out"; then
         # The lockout is ~2 minutes ("locked out for 2 minutes"); sleep past
@@ -497,8 +523,10 @@ for _attempt in 1 2 3 4 5; do
 done
 unset _attempt _login
 
+# The login above still runs without NFS: weka-org-cleanup.sh reuses its session.
 GW_IP=""
 for _attempt in 1 2 3 4 5; do
+    [ "$WEKA_ENABLE_NFS" = "true" ] || break
     _raw=$(weka cluster container -J 2>&1)
     if echo "$_raw" | grep -qi "locked out"; then
         log "Weka login locked out; waiting 130s before retry ${_attempt}/5"
@@ -515,7 +543,9 @@ set -e
 # Operator-pinned fallback: if discovery failed, use WEKA_NFS_SERVER from
 # ci-env as a safety net.  This lets the operator hard-code a known-good
 # gateway IP without touching deployment code.
-if [ -z "$GW_IP" ] && [ -n "${WEKA_NFS_SERVER:-}" ]; then
+if [ "$WEKA_ENABLE_NFS" != "true" ]; then
+    log "WEKA_ENABLE_NFS=${WEKA_ENABLE_NFS}; WEKAFS-only, skipping NFS gateway setup"
+elif [ -z "$GW_IP" ] && [ -n "${WEKA_NFS_SERVER:-}" ]; then
     log "Weka NFS gateway not discovered; falling back to" \
         "WEKA_NFS_SERVER=${WEKA_NFS_SERVER} from ci-env"
     GW_IP="$WEKA_NFS_SERVER"
@@ -534,7 +564,7 @@ if [ -n "$GW_IP" ]; then
     iniset /etc/manila/manila.conf weka_nfs    weka_nfs_server "$GW_IP"
     iniset /etc/manila/manila.conf weka_wekafs weka_nfs_server "$GW_IP"
     set -u
-else
+elif [ "$WEKA_ENABLE_NFS" = "true" ]; then
     log "WARNING: no UP Weka NFS gateway found after 5 attempts and no" \
         "WEKA_NFS_SERVER fallback; weka_nfs_server left unconfigured" \
         "(create_share_from_snapshot will fail)"
@@ -558,12 +588,16 @@ _health_check() {
     set -u
     local _pools
     _pools=$(openstack share pool list --detail 2>/dev/null || true)
-    if ! echo "$_pools" | grep -q "weka_nfs"; then
-        echo "weka_nfs backend not in share pool list"
-        return 1
-    fi
     if ! echo "$_pools" | grep -q "weka_wekafs"; then
         echo "weka_wekafs backend not in share pool list"
+        return 1
+    fi
+    if [ "$WEKA_ENABLE_NFS" != "true" ]; then
+        echo "n/a (WEKAFS-only)"   # used as the IP in the success log line
+        return 0
+    fi
+    if ! echo "$_pools" | grep -q "weka_nfs"; then
+        echo "weka_nfs backend not in share pool list"
         return 1
     fi
 
@@ -611,7 +645,7 @@ done
 set -e
 
 if [ "$_hg_ok" -eq 1 ]; then
-    log "Health gate OK: both backends up, weka_nfs_server=${_hg_result}"
+    log "Health gate OK: ${WEKA_ENABLED_BACKENDS} up, weka_nfs_server=${_hg_result}"
 else
     log "ERROR: CI deploy is DEGRADED — health gate failed after restart:" \
         "${_hg_result}"
