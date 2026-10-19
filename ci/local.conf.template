@@ -35,9 +35,10 @@ LOGDAYS=1
 # Specs for the plugin-created default share type (weka-nfs). Do NOT include
 # driver_handles_share_servers here — the plugin passes it positionally and
 # python-manilaclient rejects it as a duplicate in --extra-specs.
-MANILA_DEFAULT_SHARE_TYPE_EXTRA_SPECS="share_backend_name=weka_nfs snapshot_support=true create_share_from_snapshot_support=true revert_to_snapshot_support=true"
-MANILA_ENABLED_BACKENDS=weka_nfs,weka_wekafs
-MANILA_DEFAULT_SHARE_TYPE=weka-nfs
+# Backend lists and defaults come from WEKA_ENABLE_NFS (see full-redeploy.sh).
+MANILA_DEFAULT_SHARE_TYPE_EXTRA_SPECS="share_backend_name=${WEKA_DEFAULT_BACKEND} snapshot_support=true create_share_from_snapshot_support=true revert_to_snapshot_support=true"
+MANILA_ENABLED_BACKENDS=${WEKA_ENABLED_BACKENDS}
+MANILA_DEFAULT_SHARE_TYPE=${WEKA_DEFAULT_SHARE_TYPE}
 SHARE_DRIVER=manila.share.drivers.weka.driver.WekaShareDriver
 MANILA_OPTGROUP_DEFAULT_driver_handles_share_servers=false
 
@@ -46,9 +47,9 @@ INSTALL_TEMPEST=True
 
 [[post-config|$MANILA_CONF]]
 [DEFAULT]
-enabled_share_backends = weka_nfs,weka_wekafs
-enabled_share_protocols = NFS,WEKAFS
-default_share_type = weka-nfs
+enabled_share_backends = ${WEKA_ENABLED_BACKENDS}
+enabled_share_protocols = ${WEKA_ENABLED_PROTOCOLS}
+default_share_type = ${WEKA_DEFAULT_SHARE_TYPE}
 debug = true
 
 # ── NFS backend ──────────────────────────────────────────
@@ -68,6 +69,7 @@ weka_username = ${WEKA_USERNAME}
 # value into the published stack.sh.log. It is set post-stack (untraced) in
 # full-redeploy.sh instead.
 weka_organization = ${WEKA_ORGANIZATION}
+weka_org_prefix = ${WEKA_ORG_PREFIX}
 weka_filesystem_group = default
 weka_share_name_prefix = ci_nfs_
 weka_mount_point_base = /mnt/weka/nfs
@@ -97,6 +99,7 @@ weka_username = ${WEKA_USERNAME}
 # value into the published stack.sh.log. It is set post-stack (untraced) in
 # full-redeploy.sh instead.
 weka_organization = ${WEKA_ORGANIZATION}
+weka_org_prefix = ${WEKA_ORG_PREFIX}
 weka_filesystem_group = default
 weka_share_name_prefix = ci_wfs_
 weka_mount_point_base = /mnt/weka/wekafs
@@ -111,7 +114,7 @@ manila = true
 
 [share]
 multi_backend = true
-backend_names = weka_nfs,weka_wekafs
+backend_names = ${WEKA_ENABLED_BACKENDS}
 multitenancy_enabled = false
 run_driver_assisted_migration_tests = false
 run_host_assisted_migration_tests = false

@@ -124,10 +124,17 @@ log "You can follow progress with: ssh ${SSH_USER}@${VM_IP} 'tail -f /tmp/ci-set
 
 ssh "${SSH_USER}@${VM_IP}" "
     sudo WEKA_API_SERVER='${WEKA_API_SERVER}' \
-         WEKA_API_PORT='14000' \
-         WEKA_USERNAME='admin' \
+         WEKA_API_PORT='${WEKA_API_PORT:-14000}' \
+         WEKA_USERNAME='${WEKA_USERNAME:-admin}' \
          WEKA_PASSWORD='${WEKA_PASSWORD}' \
-         WEKA_ORGANIZATION='Root' \
+         WEKA_ORGANIZATION='${WEKA_ORGANIZATION:-Root}' \
+         WEKA_JOIN_IPS='${WEKA_JOIN_IPS:-}' \
+         WEKA_JOIN_TOKEN='${WEKA_JOIN_TOKEN:-}' \
+         WEKA_ENABLE_NFS='${WEKA_ENABLE_NFS:-true}' \
+         WEKA_ORG_PREFIX='${WEKA_ORG_PREFIX:-manila-}' \
+         WEKA_ORG_ADMIN_SECRET='${WEKA_ORG_ADMIN_SECRET:-}' \
+         WEKA_NFS_SERVER='${WEKA_NFS_SERVER:-}' \
+         CI_TRUSTED_USERS='${CI_TRUSTED_USERS:-}' \
          CI_VM_IP='${VM_IP}' \
          GERRIT_USER='${GERRIT_USER}' \
          CI_ALLOWED_CIDRS='${CI_ALLOWED_CIDRS:-}' \
@@ -180,7 +187,7 @@ echo ""
 echo "  CI VM:        ${VM_IP}"
 echo "  Logs:         http://${VM_IP}:8088/"
 echo "  Gerrit user:  ${GERRIT_USER}"
-echo "  Weka cluster: ${WEKA_API_SERVER}:14000"
+echo "  Weka cluster: ${WEKA_API_SERVER}:${WEKA_API_PORT:-14000}"
 echo ""
 echo "  Monitor:      ssh ${SSH_USER}@${VM_IP} 'journalctl -u weka-manila-ci -f'"
 echo "  Status:       ssh ${SSH_USER}@${VM_IP} 'sudo systemctl status weka-manila-ci'"

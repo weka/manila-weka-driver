@@ -30,6 +30,17 @@ BRANCH = "master"
 # generic "recheck" comments once the CI is trusted.
 AUTO_RUN = False
 
+# Gerrit usernames allowed to trigger a run by comment (comma-separated, from
+# ci-env). A run executes the change's code on the CI host, which holds Weka
+# cluster-admin credentials, so on a shared cluster this must be set. Empty
+# means anyone can trigger (the original behaviour). Keep AUTO_RUN off when
+# relying on this: auto-runs are not gated by it.
+TRUSTED_USERS = {
+    u.strip().lower()
+    for u in os.environ.get("CI_TRUSTED_USERS", "").split(",")
+    if u.strip()
+}
+
 CI_DIR = "/opt/weka-ci"
 STATE_DIR = "/var/lib/weka-ci"
 LOCK_FILE = os.path.join(STATE_DIR, "runner.lock")
@@ -160,6 +171,14 @@ def parse_event(event):
         triggered = re.search(
             r"\brun-weka-ci\b", comment, re.IGNORECASE) or (
             AUTO_RUN and re.search(r"\brecheck\b", comment, re.IGNORECASE))
+        if triggered and TRUSTED_USERS:
+            author = (event.get("author", {}).get("username") or "").lower()
+            if author not in TRUSTED_USERS:
+                log.info(
+                    "Ignoring trigger on %s from untrusted user %r",
+                    change.get("number"), author,
+                )
+                return None
         if triggered:
             ps = event.get("patchSet", {})
             return (
@@ -243,6 +262,10 @@ def main():
         "AUTO_RUN (patchset-created + recheck + run-weka-ci)" if AUTO_RUN
         else "comment-triggered only (run-weka-ci)",
     )
+    if TRUSTED_USERS:
+        log.info("Trusted triggerers: %s", ", ".join(sorted(TRUSTED_USERS)))
+    else:
+        log.warning("CI_TRUSTED_USERS is empty: ANY Gerrit user can trigger a run")
 
     for event in stream_events():
         parsed = parse_event(event)

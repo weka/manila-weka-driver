@@ -14,6 +14,14 @@
 #   - Environment variables set (or edit the defaults below):
 #       WEKA_API_SERVER, WEKA_API_PORT, WEKA_USERNAME, WEKA_PASSWORD, WEKA_ORGANIZATION
 #       CI_ALLOWED_CIDRS  (space-separated CIDRs for root log directory access)
+#   - Optional:
+#       WEKA_JOIN_IPS     (comma-separated backend ip:port list; installs and
+#                          joins the local Weka client when set)
+#       WEKA_JOIN_TOKEN   (client join token, if the cluster requires one; for an
+#                          operator cluster, key "join-secret" of weka-client-<name>)
+#       WEKA_ENABLE_NFS   (false = WEKAFS-only, for clusters with no NFS gateway)
+#       CI_TRUSTED_USERS  (Gerrit usernames allowed to trigger runs, comma-separated)
+#       WEKA_ORG_PREFIX, WEKA_ORG_ADMIN_SECRET, WEKA_NFS_SERVER
 # =============================================================================
 
 set -euo pipefail
@@ -25,6 +33,25 @@ export WEKA_API_PORT="${WEKA_API_PORT:-14000}"
 export WEKA_USERNAME="${WEKA_USERNAME:-admin}"
 export WEKA_PASSWORD="${WEKA_PASSWORD:?Set WEKA_PASSWORD environment variable}"
 export WEKA_ORGANIZATION="${WEKA_ORGANIZATION:-Root}"
+export WEKA_JOIN_IPS="${WEKA_JOIN_IPS:-}"
+export WEKA_JOIN_TOKEN="${WEKA_JOIN_TOKEN:-}"
+export WEKA_ENABLE_NFS="${WEKA_ENABLE_NFS:-true}"
+export WEKA_ORG_PREFIX="${WEKA_ORG_PREFIX:-manila-}"
+export WEKA_ORG_ADMIN_SECRET="${WEKA_ORG_ADMIN_SECRET:-}"
+export WEKA_NFS_SERVER="${WEKA_NFS_SERVER:-}"
+export CI_TRUSTED_USERS="${CI_TRUSTED_USERS:-}"
+# Same derivation as full-redeploy.sh, which owns every later deploy.
+if [ "$WEKA_ENABLE_NFS" = "true" ]; then
+    export WEKA_ENABLED_BACKENDS="weka_nfs,weka_wekafs"
+    export WEKA_ENABLED_PROTOCOLS="NFS,WEKAFS"
+    export WEKA_DEFAULT_BACKEND="weka_nfs"
+    export WEKA_DEFAULT_SHARE_TYPE="weka-nfs"
+else
+    export WEKA_ENABLED_BACKENDS="weka_wekafs"
+    export WEKA_ENABLED_PROTOCOLS="WEKAFS"
+    export WEKA_DEFAULT_BACKEND="weka_wekafs"
+    export WEKA_DEFAULT_SHARE_TYPE="weka-wekafs"
+fi
 export CI_VM_IP="${CI_VM_IP:-$(hostname -I | awk '{print $1}')}"
 export CI_HOST_IP="$(hostname -I | awk '{print $1}')"
 export CI_LOG_URL="http://${CI_VM_IP}:8088"
@@ -97,8 +124,17 @@ WEKA_API_PORT=${WEKA_API_PORT}
 WEKA_USERNAME=${WEKA_USERNAME}
 WEKA_PASSWORD=${WEKA_PASSWORD}
 WEKA_ORGANIZATION=${WEKA_ORGANIZATION}
+WEKA_ENABLE_NFS=${WEKA_ENABLE_NFS}
+WEKA_ORG_PREFIX=${WEKA_ORG_PREFIX}
 GERRIT_USER=${GERRIT_USER}
 EOF
+# Optional keys are written only when set, so the scripts' defaults still apply.
+for _key in WEKA_ORG_ADMIN_SECRET WEKA_NFS_SERVER WEKA_JOIN_IPS CI_TRUSTED_USERS; do
+    if [ -n "${!_key}" ]; then
+        echo "${_key}=${!_key}" >> /opt/weka-ci/ci-env
+    fi
+done
+unset _key
 chmod 600 /opt/weka-ci/ci-env
 chown stack:stack /opt/weka-ci/ci-env
 
@@ -182,6 +218,53 @@ cat > /etc/cron.d/weka-ci-logs <<'CRON'
 0 3 * * * root find /var/www/ci-logs -type d -mindepth 1 -maxdepth 1 -mtime +45 -exec rm -rf {} \;
 CRON
 
+# ── 8a. Install and join the Weka client ─────────────────────────────────────
+# The driver mounts wekafs on this host (snapshot copies, _ensure_share), and
+# full-redeploy.sh's `weka` CLI calls go through the local client, so it must
+# be joined to the same cluster as WEKA_API_SERVER. The client is installed
+# from the cluster itself so its version matches the backends exactly.
+# Skipped when WEKA_JOIN_IPS is unset (the client was set up some other way).
+
+if [ -n "$WEKA_JOIN_IPS" ]; then
+    log "Installing Weka client from ${WEKA_API_SERVER}:${WEKA_API_PORT}"
+    curl -k --fail -o /tmp/weka-install.sh \
+        "https://${WEKA_API_SERVER}:${WEKA_API_PORT}/dist/v1/install"
+    bash /tmp/weka-install.sh
+    rm -f /tmp/weka-install.sh
+
+    # The installer only sets up the agent; fetch the cluster's own release.
+    weka user login "${WEKA_USERNAME}" "${WEKA_PASSWORD}" \
+        -H "${WEKA_API_SERVER}" -P "${WEKA_API_PORT}" >/dev/null
+    _release=$(weka status -J -H "${WEKA_API_SERVER}" -P "${WEKA_API_PORT}" \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)["release"])')
+    # --set-current can report "Version missing" while still finishing the
+    # switch, so judge by the resulting current version instead.
+    weka version get "${_release}" \
+        --from "https://${WEKA_API_SERVER}:${WEKA_API_PORT}" \
+        --client-only --set-current --no-progress-bar || true
+    [ "$(weka version current)" = "${_release}" ] \
+        || { log "ERROR: Weka client version is not ${_release}"; exit 1; }
+    unset _release
+
+    if weka local ps 2>/dev/null | grep -qw client; then
+        log "Weka client container already exists; not re-joining"
+    else
+        # Clients authenticate with a join token (--join-token, not shown in
+        # --help); --join-secret is for backends and is rejected with --client.
+        log "Joining Weka client (UDP mode) to ${WEKA_JOIN_IPS}"
+        _join_token_args=()
+        if [ -n "$WEKA_JOIN_TOKEN" ]; then
+            _join_token_args=(--join-token "$WEKA_JOIN_TOKEN")
+        fi
+        weka local setup container --name client --client \
+            --only-frontend-cores --cores 1 --net udp \
+            --management-ips "${CI_HOST_IP}" \
+            --join-ips "${WEKA_JOIN_IPS}" "${_join_token_args[@]}"
+        unset _join_token_args
+    fi
+    modprobe wekafsio
+fi
+
 # ── 9. Deploy DevStack ───────────────────────────────────────────────────────
 
 log "Deploying DevStack (this will take 20-40 minutes)"
@@ -194,11 +277,16 @@ sudo -u stack \
     WEKA_USERNAME="${WEKA_USERNAME}" \
     WEKA_PASSWORD="${WEKA_PASSWORD}" \
     WEKA_ORGANIZATION="${WEKA_ORGANIZATION}" \
+    WEKA_ENABLED_BACKENDS="${WEKA_ENABLED_BACKENDS}" \
+    WEKA_ENABLED_PROTOCOLS="${WEKA_ENABLED_PROTOCOLS}" \
+    WEKA_DEFAULT_BACKEND="${WEKA_DEFAULT_BACKEND}" \
+    WEKA_DEFAULT_SHARE_TYPE="${WEKA_DEFAULT_SHARE_TYPE}" \
+    WEKA_ORG_PREFIX="${WEKA_ORG_PREFIX}" \
     bash -c "
     cd /opt/stack
     git clone -b stable/2025.1 https://opendev.org/openstack/devstack.git
     cd devstack
-    envsubst '\$CI_HOST_IP \$CI_VM_IP \$WEKA_API_SERVER \$WEKA_API_PORT \$WEKA_USERNAME \$WEKA_PASSWORD \$WEKA_ORGANIZATION' < /opt/weka-ci/local.conf.template > local.conf
+    envsubst '\$CI_HOST_IP \$CI_VM_IP \$WEKA_API_SERVER \$WEKA_API_PORT \$WEKA_USERNAME \$WEKA_PASSWORD \$WEKA_ORGANIZATION \$WEKA_ENABLED_BACKENDS \$WEKA_ENABLED_PROTOCOLS \$WEKA_DEFAULT_BACKEND \$WEKA_DEFAULT_SHARE_TYPE \$WEKA_ORG_PREFIX' < /opt/weka-ci/local.conf.template > local.conf
     ./stack.sh
 "
 
@@ -213,13 +301,15 @@ fi
 # ── 10. Create share types ───────────────────────────────────────────────────
 
 log "Creating share types"
-sudo -u stack bash -c "
+sudo -u stack WEKA_ENABLE_NFS="${WEKA_ENABLE_NFS}" bash -c "
     source /opt/stack/devstack/openrc admin admin
-    openstack share type create weka-nfs false \
-        --extra-specs share_backend_name=weka_nfs \
-        snapshot_support=true \
-        create_share_from_snapshot_support=true \
-        revert_to_snapshot_support=true
+    if [ \"\$WEKA_ENABLE_NFS\" = true ]; then
+        openstack share type create weka-nfs false \
+            --extra-specs share_backend_name=weka_nfs \
+            snapshot_support=true \
+            create_share_from_snapshot_support=true \
+            revert_to_snapshot_support=true
+    fi
 
     openstack share type create weka-wekafs false \
         --extra-specs share_backend_name=weka_wekafs \
@@ -247,9 +337,8 @@ systemctl start weka-manila-ci-redeploy.timer
 log "=== Setup complete ==="
 echo ""
 echo "Next steps:"
-echo "  1. Install the Weka client on this VM (for WekaFS kernel module):"
-echo "     curl -k -o /tmp/weka-client.tar https://${WEKA_API_SERVER}:${WEKA_API_PORT}/dist/v1/install/<version>"
-echo "     tar xf /tmp/weka-client.tar && sudo ./install.sh && sudo modprobe wekafsio"
+echo "  1. Check the Weka client is joined (set WEKA_JOIN_IPS to have setup.sh do it):"
+echo "     weka local ps   # 'client' container Running"
 echo ""
 echo "  2. Start the CI listener:"
 echo "     sudo systemctl start weka-manila-ci"
