@@ -291,9 +291,18 @@ sudo -u stack \
     WEKA_DEFAULT_SHARE_TYPE="${WEKA_DEFAULT_SHARE_TYPE}" \
     WEKA_ORG_PREFIX="${WEKA_ORG_PREFIX}" \
     bash -c "
-    cd /opt/stack
-    git clone -b stable/2025.1 https://opendev.org/openstack/devstack.git
-    cd devstack
+    # master, like full-redeploy.sh: local.conf pulls manila and its plugins
+    # from master, which a stable DevStack's constraints cannot install.
+    # Re-runs reuse the clone left by an earlier attempt.
+    if [ -d /opt/stack/devstack ]; then
+        cd /opt/stack/devstack
+        git fetch origin
+        git reset --hard origin/master
+    else
+        cd /opt/stack
+        git clone -b master https://opendev.org/openstack/devstack.git
+        cd devstack
+    fi
     envsubst '\$CI_HOST_IP \$CI_VM_IP \$WEKA_API_SERVER \$WEKA_API_PORT \$WEKA_USERNAME \$WEKA_PASSWORD \$WEKA_ORGANIZATION \$WEKA_ENABLED_BACKENDS \$WEKA_ENABLED_PROTOCOLS \$WEKA_DEFAULT_BACKEND \$WEKA_DEFAULT_SHARE_TYPE \$WEKA_ORG_PREFIX' < /opt/weka-ci/local.conf.template > local.conf
     ./stack.sh
 "
