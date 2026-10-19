@@ -32,14 +32,26 @@ AUTO_RUN = False
 
 # Gerrit usernames allowed to trigger a run by comment (comma-separated, from
 # ci-env). A run executes the change's code on the CI host, which holds Weka
-# cluster-admin credentials, so on a shared cluster this must be set. Empty
-# means anyone can trigger (the original behaviour). Keep AUTO_RUN off when
-# relying on this: auto-runs are not gated by it.
+# cluster-admin credentials, so on a shared cluster this (or CI_TRUSTED_GROUPS)
+# must be set. Both empty means anyone can trigger (the original behaviour).
+# Keep AUTO_RUN off when relying on this: auto-runs are not gated by it.
 TRUSTED_USERS = {
     u.strip().lower()
     for u in os.environ.get("CI_TRUSTED_USERS", "").split(",")
     if u.strip()
 }
+
+# Gerrit groups whose members may also trigger (comma-separated, from ci-env),
+# e.g. "manila-core": vetted people, and the list maintains itself. Membership
+# is read with `gerrit ls-members` as GERRIT_USER and cached; a failed lookup
+# trusts nobody extra.
+TRUSTED_GROUPS = [
+    g.strip()
+    for g in os.environ.get("CI_TRUSTED_GROUPS", "").split(",")
+    if g.strip()
+]
+GROUP_CACHE_TTL = 600         # seconds a good membership read is reused
+GROUP_RETRY_AFTER = 60        # seconds before retrying a failed read
 
 CI_DIR = "/opt/weka-ci"
 STATE_DIR = "/var/lib/weka-ci"
@@ -135,6 +147,62 @@ def stream_events():
         time.sleep(backoff)
         backoff = min(backoff * 2, 300)
 
+# ── Trusted groups ───────────────────────────────────────────────────────────
+
+_group_cache = {"members": set(), "fetched": float("-inf")}  # never read yet
+
+
+def group_members():
+    """Return the lowercased usernames in TRUSTED_GROUPS, cached.
+
+    A group that cannot be read (SSH error, or missing/hidden: Gerrit then
+    prints a message with exit status 0 instead of the header) contributes
+    nobody, and the read is retried sooner than a good one is refreshed.
+    """
+    if not TRUSTED_GROUPS:
+        return set()
+    now = time.time()
+    if now - _group_cache["fetched"] < GROUP_CACHE_TTL:
+        return _group_cache["members"]
+
+    members = set()
+    ok = True
+    for group in TRUSTED_GROUPS:
+        try:
+            out = subprocess.run(
+                [
+                    "ssh",
+                    "-p", str(GERRIT_PORT),
+                    "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=15",
+                    "-o", "StrictHostKeyChecking=no",
+                    f"{GERRIT_USER}@{GERRIT_HOST}",
+                    "gerrit", "ls-members", group, "--recursive",
+                ],
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+        except (subprocess.SubprocessError, OSError) as e:
+            log.warning("Could not read Gerrit group %r: %s", group, e)
+            ok = False
+            continue
+        lines = out.splitlines()
+        if not lines or not lines[0].startswith("id\tusername"):
+            log.warning(
+                "Could not read Gerrit group %r: %s",
+                group, out.strip()[:200] or "(no output)",
+            )
+            ok = False
+            continue
+        for line in lines[1:]:
+            cols = line.split("\t")
+            if len(cols) > 1 and cols[1].strip():
+                members.add(cols[1].strip().lower())
+
+    _group_cache["members"] = members
+    _group_cache["fetched"] = (
+        now if ok else now - GROUP_CACHE_TTL + GROUP_RETRY_AFTER)
+    return members
+
 # ── Event filtering ──────────────────────────────────────────────────────────
 
 def parse_event(event):
@@ -171,9 +239,9 @@ def parse_event(event):
         triggered = re.search(
             r"\brun-weka-ci\b", comment, re.IGNORECASE) or (
             AUTO_RUN and re.search(r"\brecheck\b", comment, re.IGNORECASE))
-        if triggered and TRUSTED_USERS:
+        if triggered and (TRUSTED_USERS or TRUSTED_GROUPS):
             author = (event.get("author", {}).get("username") or "").lower()
-            if author not in TRUSTED_USERS:
+            if author not in TRUSTED_USERS and author not in group_members():
                 log.info(
                     "Ignoring trigger on %s from untrusted user %r",
                     change.get("number"), author,
@@ -262,10 +330,20 @@ def main():
         "AUTO_RUN (patchset-created + recheck + run-weka-ci)" if AUTO_RUN
         else "comment-triggered only (run-weka-ci)",
     )
-    if TRUSTED_USERS:
-        log.info("Trusted triggerers: %s", ", ".join(sorted(TRUSTED_USERS)))
+    if TRUSTED_USERS or TRUSTED_GROUPS:
+        log.info(
+            "Trusted triggerers: %s",
+            ", ".join(sorted(TRUSTED_USERS)) or "(none listed)",
+        )
+        if TRUSTED_GROUPS:
+            log.info(
+                "Trusted groups: %s (%d members)",
+                ", ".join(TRUSTED_GROUPS), len(group_members()),
+            )
     else:
-        log.warning("CI_TRUSTED_USERS is empty: ANY Gerrit user can trigger a run")
+        log.warning(
+            "CI_TRUSTED_USERS and CI_TRUSTED_GROUPS are empty: "
+            "ANY Gerrit user can trigger a run")
 
     for event in stream_events():
         parsed = parse_event(event)

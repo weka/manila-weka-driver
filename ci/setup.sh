@@ -21,6 +21,7 @@
 #                          operator cluster, key "join-secret" of weka-client-<name>)
 #       WEKA_ENABLE_NFS   (false = WEKAFS-only, for clusters with no NFS gateway)
 #       CI_TRUSTED_USERS  (Gerrit usernames allowed to trigger runs, comma-separated)
+#       CI_TRUSTED_GROUPS (Gerrit groups whose members may trigger, e.g. manila-core)
 #       WEKA_ORG_PREFIX, WEKA_ORG_ADMIN_SECRET, WEKA_NFS_SERVER
 # =============================================================================
 
@@ -40,6 +41,7 @@ export WEKA_ORG_PREFIX="${WEKA_ORG_PREFIX:-manila-}"
 export WEKA_ORG_ADMIN_SECRET="${WEKA_ORG_ADMIN_SECRET:-}"
 export WEKA_NFS_SERVER="${WEKA_NFS_SERVER:-}"
 export CI_TRUSTED_USERS="${CI_TRUSTED_USERS:-}"
+export CI_TRUSTED_GROUPS="${CI_TRUSTED_GROUPS:-}"
 # Same derivation as full-redeploy.sh, which owns every later deploy.
 if [ "$WEKA_ENABLE_NFS" = "true" ]; then
     export WEKA_ENABLED_BACKENDS="weka_nfs,weka_wekafs"
@@ -129,7 +131,7 @@ WEKA_ORG_PREFIX=${WEKA_ORG_PREFIX}
 GERRIT_USER=${GERRIT_USER}
 EOF
 # Optional keys are written only when set, so the scripts' defaults still apply.
-for _key in WEKA_ORG_ADMIN_SECRET WEKA_NFS_SERVER WEKA_JOIN_IPS CI_TRUSTED_USERS; do
+for _key in WEKA_ORG_ADMIN_SECRET WEKA_NFS_SERVER WEKA_JOIN_IPS CI_TRUSTED_USERS CI_TRUSTED_GROUPS; do
     if [ -n "${!_key}" ]; then
         echo "${_key}=${!_key}" >> /opt/weka-ci/ci-env
     fi
