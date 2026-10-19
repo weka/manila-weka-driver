@@ -65,7 +65,14 @@ fi
 
 log "Step 2: Copying CI files to VM..."
 ssh "${SSH_USER}@${VM_IP}" "rm -rf /tmp/manila-weka-driver-ci && mkdir -p /tmp/manila-weka-driver-ci"
-scp -q "${SCRIPT_DIR}"/* "${SSH_USER}@${VM_IP}:/tmp/manila-weka-driver-ci/"
+# Files only: scp fails on subdirectories such as a local __pycache__.
+CI_FILES=()
+for f in "${SCRIPT_DIR}"/*; do
+    if [ -f "$f" ]; then
+        CI_FILES+=("$f")
+    fi
+done
+scp -q "${CI_FILES[@]}" "${SSH_USER}@${VM_IP}:/tmp/manila-weka-driver-ci/"
 log "Files copied"
 
 # ── Step 3: Generate SSH key for Gerrit (if needed) ──────────────────────────
@@ -122,7 +129,9 @@ ssh "${SSH_USER}@${VM_IP}" "
 log "Step 5: Running setup on VM (this takes 20-40 minutes)..."
 log "You can follow progress with: ssh ${SSH_USER}@${VM_IP} 'tail -f /tmp/ci-setup.log'"
 
+# pipefail: without it the exit status is tee's, and a failed setup carries on.
 ssh "${SSH_USER}@${VM_IP}" "
+    set -o pipefail
     sudo WEKA_API_SERVER='${WEKA_API_SERVER}' \
          WEKA_API_PORT='${WEKA_API_PORT:-14000}' \
          WEKA_USERNAME='${WEKA_USERNAME:-admin}' \
