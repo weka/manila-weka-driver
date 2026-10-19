@@ -166,6 +166,10 @@ if [ -n "$CI_ALLOWED_CIDRS" ]; then
     done
     NGINX_ALLOW_RULES="${NGINX_ALLOW_RULES}        deny all;"
 fi
+# Resolved here, not inside the heredoc: bash ends a $(...) in a heredoc at the
+# first ")", so a default containing parentheses breaks the whole block.
+NGINX_ALLOW_RULES=$(printf '%b' \
+    "${NGINX_ALLOW_RULES:-        # unrestricted (set CI_ALLOWED_CIDRS to restrict)}")
 
 cat > /etc/nginx/sites-available/weka-ci-logs <<NGINX
 server {
@@ -173,7 +177,7 @@ server {
     server_name _;
     root /var/www/ci-logs;
     location = / {
-$(echo -e "${NGINX_ALLOW_RULES:-        # unrestricted (set CI_ALLOWED_CIDRS to restrict)")
+${NGINX_ALLOW_RULES}
         autoindex on;
         autoindex_exact_size off;
         autoindex_localtime on;
@@ -226,11 +230,15 @@ CRON
 # Skipped when WEKA_JOIN_IPS is unset (the client was set up some other way).
 
 if [ -n "$WEKA_JOIN_IPS" ]; then
-    log "Installing Weka client from ${WEKA_API_SERVER}:${WEKA_API_PORT}"
-    curl -k --fail -o /tmp/weka-install.sh \
-        "https://${WEKA_API_SERVER}:${WEKA_API_PORT}/dist/v1/install"
-    bash /tmp/weka-install.sh
-    rm -f /tmp/weka-install.sh
+    # Reinstalling restarts the agent under an already-joined client, so a
+    # re-run leaves an existing install alone.
+    if ! command -v weka >/dev/null 2>&1; then
+        log "Installing Weka client from ${WEKA_API_SERVER}:${WEKA_API_PORT}"
+        curl -k --fail -o /tmp/weka-install.sh \
+            "https://${WEKA_API_SERVER}:${WEKA_API_PORT}/dist/v1/install"
+        bash /tmp/weka-install.sh
+        rm -f /tmp/weka-install.sh
+    fi
 
     # The installer only sets up the agent; fetch the cluster's own release.
     weka user login "${WEKA_USERNAME}" "${WEKA_PASSWORD}" \
