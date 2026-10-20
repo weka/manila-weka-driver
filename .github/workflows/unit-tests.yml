@@ -12,7 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.11", "3.12"]
+        # 3.11/3.12 cover the DevStack target (Ubuntu 24.04 ships 3.12);
+        # 3.14 is what upstream manila gates on (openstack-tox-py314).
+        python-version: ["3.11", "3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
