@@ -291,6 +291,13 @@ fi
 
 log "Deploying DevStack (this will take 20-40 minutes)"
 
+# A freshly booted image runs unattended-upgrades for its first minutes, and
+# DevStack's apt-get fails on the dpkg lock instead of waiting for it.
+while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    log "Waiting for another apt/dpkg process (e.g. unattended-upgrades) to finish"
+    sleep 15
+done
+
 sudo -u stack \
     CI_HOST_IP="${CI_HOST_IP}" \
     CI_VM_IP="${CI_VM_IP}" \
