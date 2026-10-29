@@ -10,10 +10,12 @@
 # create fails with "Could not create tenant: Tenant table is full", tipping
 # a whole WEKAFS pass into cascading ERRORs.
 #
-# This reaps leftover CI orgs (name prefix "manila-") so the table stays
-# clear. It is CI-only: every manila-* org on this cluster is an ephemeral CI
-# test tenant, so it is safe to remove them all. It runs pre-tempest, when no
-# share is live, and is invoked with "|| true" -- it never fails a build.
+# This reaps leftover CI orgs (name prefix $WEKA_ORG_PREFIX, default
+# "manila-") so the table stays clear. Every org with that prefix must be an
+# ephemeral CI test tenant -- on a shared cluster, pick a prefix nothing else
+# uses. ci-runner.sh runs it before tempest and again after posting results,
+# both when no share is live, and invokes it with "|| true" -- it never fails a
+# build.
 #
 # Uses the weka CLI's own (auto-refreshed) session, so it performs NO password
 # login: that avoids the login-lockout the CI already guards against, and it

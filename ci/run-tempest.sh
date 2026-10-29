@@ -132,10 +132,30 @@ AGGREGATE_RC=1
 [ "$RC_NFS" -eq 0 ] && [ "$RC_WEKAFS" -eq 0 ] && AGGREGATE_RC=0
 
 # ── Write combined summary to tempest.log ────────────────────────────────────
-# ci-runner.sh parses this via: tail -5 tempest.log | grep -E "Ran|passed|failed"
-# | head -1, so the aggregate line must fall within the last 5 lines.
-NFS_SUMMARY=$(grep -E "Ran [0-9]|passed|failed" "${LOG_DIR}/tempest-nfs.log" | tail -3 || echo "(no summary)")
-WEKAFS_SUMMARY=$(grep -E "Ran [0-9]|passed|failed" "${LOG_DIR}/tempest-wekafs.log" | tail -3 || echo "(no summary)")
+# ci-runner.sh posts the last line of tempest.log in the Gerrit comment, so the
+# one-line aggregate summary must come last.
+
+# "889 run, 753 passed, 136 skipped, 0 failed" from a pass log's Totals block
+# (tempest prints "Ran: N tests in ..." and " - Passed: N"), or "(no summary)".
+pass_counts() {
+    awk '/^Ran: [0-9]+ tests/ {ran = $2}
+         /^ - Passed: /  {p = $3}
+         /^ - Skipped: / {s = $3}
+         /^ - Failed: /  {f = $3}
+         END {
+             if (ran == "") print "(no summary)"
+             else printf "%s run, %d passed, %d skipped, %d failed\n", ran, p, s, f
+         }' "$1" 2>/dev/null || echo "(no summary)"
+}
+
+if [ "$WEKA_ENABLE_NFS" = "true" ]; then
+    NFS_SUMMARY=$(pass_counts "${LOG_DIR}/tempest-nfs.log")
+else
+    NFS_SUMMARY="skipped (WEKAFS-only cluster)"
+fi
+WEKAFS_SUMMARY=$(pass_counts "${LOG_DIR}/tempest-wekafs.log")
+VERDICT=failed
+[ "$AGGREGATE_RC" -eq 0 ] && VERDICT=passed
 
 {
     echo "=== NFS pass (RC=${RC_NFS}) ==="
@@ -144,10 +164,10 @@ WEKAFS_SUMMARY=$(grep -E "Ran [0-9]|passed|failed" "${LOG_DIR}/tempest-wekafs.lo
     echo "=== WEKAFS pass (RC=${RC_WEKAFS}) ==="
     echo "$WEKAFS_SUMMARY"
     echo ""
-    if [ "$AGGREGATE_RC" -eq 0 ]; then
-        echo "Ran 2 passes - passed (NFS RC=0, WEKAFS RC=0)"
+    if [ "$WEKA_ENABLE_NFS" = "true" ]; then
+        echo "Ran 2 passes - ${VERDICT}: NFS ${NFS_SUMMARY}; WEKAFS ${WEKAFS_SUMMARY}"
     else
-        echo "Ran 2 passes - failed (NFS RC=${RC_NFS}, WEKAFS RC=${RC_WEKAFS})"
+        echo "Ran WEKAFS pass - ${VERDICT}: ${WEKAFS_SUMMARY} (NFS pass skipped: WEKAFS-only cluster)"
     fi
 } > "${LOG_DIR}/tempest.log"
 

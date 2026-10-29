@@ -21,6 +21,7 @@
 #                          operator cluster, key "join-secret" of weka-client-<name>)
 #       WEKA_ENABLE_NFS   (false = WEKAFS-only, for clusters with no NFS gateway)
 #       CI_TRUSTED_USERS  (Gerrit usernames allowed to trigger runs, comma-separated)
+#       CI_TRUSTED_GROUPS (Gerrit groups whose members may trigger, e.g. manila-core)
 #       WEKA_ORG_PREFIX, WEKA_ORG_ADMIN_SECRET, WEKA_NFS_SERVER
 # =============================================================================
 
@@ -40,6 +41,7 @@ export WEKA_ORG_PREFIX="${WEKA_ORG_PREFIX:-manila-}"
 export WEKA_ORG_ADMIN_SECRET="${WEKA_ORG_ADMIN_SECRET:-}"
 export WEKA_NFS_SERVER="${WEKA_NFS_SERVER:-}"
 export CI_TRUSTED_USERS="${CI_TRUSTED_USERS:-}"
+export CI_TRUSTED_GROUPS="${CI_TRUSTED_GROUPS:-}"
 # Same derivation as full-redeploy.sh, which owns every later deploy.
 if [ "$WEKA_ENABLE_NFS" = "true" ]; then
     export WEKA_ENABLED_BACKENDS="weka_nfs,weka_wekafs"
@@ -129,7 +131,7 @@ WEKA_ORG_PREFIX=${WEKA_ORG_PREFIX}
 GERRIT_USER=${GERRIT_USER}
 EOF
 # Optional keys are written only when set, so the scripts' defaults still apply.
-for _key in WEKA_ORG_ADMIN_SECRET WEKA_NFS_SERVER WEKA_JOIN_IPS CI_TRUSTED_USERS; do
+for _key in WEKA_ORG_ADMIN_SECRET WEKA_NFS_SERVER WEKA_JOIN_IPS CI_TRUSTED_USERS CI_TRUSTED_GROUPS; do
     if [ -n "${!_key}" ]; then
         echo "${_key}=${!_key}" >> /opt/weka-ci/ci-env
     fi
@@ -200,6 +202,18 @@ ln -sf /etc/nginx/sites-available/weka-ci-logs /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 systemctl restart nginx
 systemctl enable nginx
+
+# Oracle's Ubuntu images ship iptables rules that REJECT every new inbound
+# connection except SSH, so the log links posted to Gerrit would be dead even
+# with the cloud firewall open. Allow 8088 ahead of the REJECT and persist it.
+if ! iptables -C INPUT -p tcp -m state --state NEW -m tcp --dport 8088 -j ACCEPT 2>/dev/null; then
+    _reject=$(iptables -L INPUT --line-numbers -n | awk '$2 == "REJECT" {print $1; exit}')
+    iptables -I INPUT "${_reject:-1}" -p tcp -m state --state NEW -m tcp --dport 8088 -j ACCEPT
+    unset _reject
+fi
+if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save
+fi
 
 # ── 7. Install systemd services ──────────────────────────────────────────────
 
@@ -276,6 +290,13 @@ fi
 # ── 9. Deploy DevStack ───────────────────────────────────────────────────────
 
 log "Deploying DevStack (this will take 20-40 minutes)"
+
+# A freshly booted image runs unattended-upgrades for its first minutes, and
+# DevStack's apt-get fails on the dpkg lock instead of waiting for it.
+while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    log "Waiting for another apt/dpkg process (e.g. unattended-upgrades) to finish"
+    sleep 15
+done
 
 sudo -u stack \
     CI_HOST_IP="${CI_HOST_IP}" \
